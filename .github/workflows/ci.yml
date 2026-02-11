@@ -1,0 +1,45 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.3"
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Debug directory structure
+        run: |
+          echo "=== Directory structure ==="
+          ls -laR
+          echo "=== Test data contents ==="
+          ls -la testdata/example || echo "No testdata directory"
+          echo "=== Disk usage ==="
+          du -sh * || true
+
+      - name: Run tests
+        run: |
+          echo "=== Running tests ==="
+          make test
+          echo "=== Test output ==="
+          ls -la testdata/example || echo "No testdata directory"
+          echo "=== File sizes ==="
+          find . -type f -exec du -h {} + || true
+
+      - name: Build
+        run: go build -v ./...
