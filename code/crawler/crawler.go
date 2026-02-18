@@ -8,9 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
 type SEO struct {
@@ -58,6 +57,11 @@ type Report struct {
 	Pages       []Page    `json:"pages"`
 }
 
+type CrawlTask struct {
+	URL   string
+	Depth int
+}
+
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("URL обязателен")
@@ -70,20 +74,149 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = 30 * time.Second
 	}
-
-	html, err := GetHTMLWithContext(ctx, opts.URL)
-	if err != nil {
-		return nil, fmt.Errorf("Проблема в получении HTML: %w", err)
+	if opts.Concurrency == 0 {
+		opts.Concurrency = 1
 	}
+	
+	rootURL, err := url.Parse(opts.URL)
+	if err != nil {
+		return nil, fmt.Errorf("Ошибка парсинга URL: %w", err)
+	}
+	
+	report := Report{
+		RootURL:     opts.URL,
+		Depth:       opts.Depth,
+		GeneratedAt: time.Now().UTC(),
+		Pages:       make([]Page, 0),
+	}
+	
+	visited := make(map[string]bool)
+	visitedMu := sync.Mutex{}
+	
+	taskChan := make(chan CrawlTask, 100)
+	resultChan := make(chan Page, 100)
+	errorChan := make(chan error, 100)
+	var wg sync.WaitGroup
+	
+	for i := 0; i < opts.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					page, err := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
+					if err != nil {
+						errorChan <- err
+						continue
+					}
+					resultChan <- page
+				}
+			}
+		}()
+	}
+	
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		taskChan <- CrawlTask{URL: opts.URL, Depth: 0}
+		visited[opts.URL] = true
+	}()
+	
+	go func() {
+		wg.Wait()
+		close(taskChan)
+		close(resultChan)
+		close(errorChan)
+	}()
+	
+	pagesMap := make(map[string]Page)
+	
+	for {
+		select {
+		case <-ctx.Done():
+			goto FINISH
+		case page, ok := <-resultChan:
+			if !ok {
+				goto FINISH
+			}
+			pagesMap[page.URL] = page
+			
+			if page.Depth < opts.Depth {
+				for _, link := range extractLinksFromPage(page.URL, page.SEO) {
+					absLink, err := normalizeURL(link, rootURL)
+					if err != nil {
+						continue
+					}
+					
+					linkURL, err := url.Parse(absLink)
+					if err != nil {
+						continue
+					}
+					
+					if isSameDomain(linkURL, rootURL) {
+						visitedMu.Lock()
+						if !visited[absLink] {
+							visited[absLink] = true
+							taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
+						}
+						visitedMu.Unlock()
+					}
+				}
+			}
+		case err := <-errorChan:
+			fmt.Printf("Ошибка при обходе: %v\n", err)
+		}
+	}
+	
+FINISH:
+	for _, page := range pagesMap {
+		report.Pages = append(report.Pages, page)
+	}
+	
+	var jsonData []byte
+	if opts.IndentJSON {
+		jsonData, err = json.MarshalIndent(report, "", "  ")
+	} else {
+		jsonData, err = json.Marshal(report)
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("Ошибка JSON: %w", err)
+	}
+	
+	return jsonData, nil
+}
 
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, rootURL *url.URL) (Page, error) {
+	page := Page{
+		URL:          pageURL,
+		Depth:        depth,
+		DiscoveredAt: time.Now().UTC(),
+		BrokenLinks:  make([]BrokenLink, 0),
+	}
+	
+	html, err := GetHTMLWithContext(ctx, pageURL)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		page.HTTPStatus = 0
+		return page, nil
+	}
+	
 	seoData := extractSEO(html)
-
+	page.SEO = seoData
+	page.Status = "ok"
+	page.HTTPStatus = 200
+	
 	rawLinks := extractLinks(html)
-	baseURL, err := url.Parse(opts.URL)
+	baseURL, err := url.Parse(pageURL)
 	if err != nil {
-		return nil, fmt.Errorf("Ошибка парсинга базового URL: %w", err)
+		return page, nil
 	}
-
+	
 	absoluteLinks := make([]string, 0)
 	for _, link := range rawLinks {
 		absLink, err := normalizeURL(link, baseURL)
@@ -94,9 +227,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			absoluteLinks = append(absoluteLinks, absLink)
 		}
 	}
-
-	brokenLinks := make([]BrokenLink, 0)
+	
 	for _, link := range absoluteLinks {
+		linkURL, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		
+		if !isSameDomain(linkURL, rootURL) {
+			continue
+		}
+		
 		statusCode, err := checkLink(ctx, opts.HTTPClient, link, opts.UserAgent)
 		if err != nil || statusCode >= 400 {
 			brokenLink := BrokenLink{
@@ -107,48 +248,20 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			} else {
 				brokenLink.StatusCode = statusCode
 			}
-			brokenLinks = append(brokenLinks, brokenLink)
+			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
 	}
+	
+	return page, nil
+}
 
-	mainPageStatus, mainPageErr := checkLink(ctx, opts.HTTPClient, opts.URL, opts.UserAgent)
+func extractLinksFromPage(pageURL string, seo *SEO) []string {
+	links := make([]string, 0)
+	return links
+}
 
-	report := Report{
-		RootURL:     opts.URL,
-		Depth:       opts.Depth,
-		GeneratedAt: time.Now().UTC(),
-		Pages: []Page{
-			{
-				URL:          opts.URL,
-				Depth:        0,
-				DiscoveredAt: time.Now().UTC(),
-				BrokenLinks:  brokenLinks,
-				SEO:          seoData,
-			},
-		},
-	}
-
-	if mainPageErr != nil {
-		report.Pages[0].Status = "error"
-		report.Pages[0].Error = mainPageErr.Error()
-		report.Pages[0].HTTPStatus = 0
-	} else {
-		report.Pages[0].Status = "ok"
-		report.Pages[0].HTTPStatus = mainPageStatus
-	}
-
-	var jsonData []byte
-	if opts.IndentJSON {
-		jsonData, err = json.MarshalIndent(report, "", "  ")
-	} else {
-		jsonData, err = json.Marshal(report)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("Ошибка JSON: %w", err)
-	}
-
-	return jsonData, nil
+func isSameDomain(linkURL, rootURL *url.URL) bool {
+	return linkURL.Host == rootURL.Host
 }
 
 func extractSEO(htmlContent string) *SEO {
@@ -160,106 +273,89 @@ func extractSEO(htmlContent string) *SEO {
 		HasH1:          false,
 		H1:             "",
 	}
-
-	doc, err := html.Parse(strings.NewReader(htmlContent))
-	if err != nil {
-		return seo
+	
+	titleStart := strings.Index(htmlContent, "<title>")
+	titleEnd := strings.Index(htmlContent, "</title>")
+	if titleStart != -1 && titleEnd != -1 && titleEnd > titleStart {
+		title := htmlContent[titleStart+7 : titleEnd]
+		title = strings.TrimSpace(title)
+		title = decodeHTMLEntities(title)
+		if title != "" {
+			seo.HasTitle = true
+			seo.Title = title
+		}
 	}
-
-	var traverse func(*html.Node)
-	traverse = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "title":
-				if n.FirstChild != nil {
-					title := strings.TrimSpace(n.FirstChild.Data)
-					title = decodeHTMLEntities(title)
-					if title != "" {
-						seo.HasTitle = true
-						seo.Title = title
-					}
-				}
-			case "h1":
-				if !seo.HasH1 && n.FirstChild != nil {
-					h1 := extractText(n)
-					h1 = strings.TrimSpace(h1)
-					h1 = decodeHTMLEntities(h1)
-					if h1 != "" {
-						seo.HasH1 = true
-						seo.H1 = h1
-					}
-				}
-			case "meta":
-				var name, content string
-				for _, attr := range n.Attr {
-					if attr.Key == "name" && strings.ToLower(attr.Val) == "description" {
-						name = attr.Val
-					}
-					if attr.Key == "content" {
-						content = attr.Val
-					}
-				}
-				if name == "description" && content != "" {
-					content = strings.TrimSpace(content)
-					content = decodeHTMLEntities(content)
-					if content != "" {
-						seo.HasDescription = true
-						seo.Description = content
-					}
+	
+	descPattern := "<meta name=\"description\" content=\""
+	descStart := strings.Index(htmlContent, descPattern)
+	if descStart != -1 {
+		contentStart := descStart + len(descPattern)
+		contentEnd := strings.Index(htmlContent[contentStart:], "\"")
+		if contentEnd != -1 {
+			description := htmlContent[contentStart : contentStart+contentEnd]
+			description = strings.TrimSpace(description)
+			description = decodeHTMLEntities(description)
+			if description != "" {
+				seo.HasDescription = true
+				seo.Description = description
+			}
+		}
+	}
+	
+	h1Start := strings.Index(htmlContent, "<h1>")
+	if h1Start == -1 {
+		h1Start = strings.Index(htmlContent, "<h1 ")
+	}
+	if h1Start != -1 {
+		h1End := strings.Index(htmlContent[h1Start:], "</h1>")
+		if h1End != -1 {
+			h1Content := htmlContent[h1Start:]
+			gtPos := strings.Index(h1Content, ">")
+			if gtPos != -1 {
+				h1Content = h1Content[gtPos+1 : h1End]
+				h1Content = strings.TrimSpace(h1Content)
+				h1Content = decodeHTMLEntities(h1Content)
+				if h1Content != "" {
+					seo.HasH1 = true
+					seo.H1 = h1Content
 				}
 			}
 		}
-
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			traverse(c)
-		}
 	}
-
-	traverse(doc)
+	
 	return seo
-}
-
-func extractText(n *html.Node) string {
-	if n.Type == html.TextNode {
-		return n.Data
-	}
-	var text string
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		text += extractText(c)
-	}
-	return text
 }
 
 func decodeHTMLEntities(s string) string {
 	replacements := map[string]string{
-		"&amp;":   "&",
-		"&lt;":    "<",
-		"&gt;":    ">",
-		"&quot;":  "\"",
-		"&#39;":   "'",
-		"&nbsp;":  " ",
-		"&copy;":  "©",
-		"&reg;":   "®",
+		"&amp;":  "&",
+		"&lt;":   "<",
+		"&gt;":   ">",
+		"&quot;": "\"",
+		"&#39;":  "'",
+		"&nbsp;": " ",
+		"&copy;": "©",
+		"&reg;":  "®",
 		"&trade;": "™",
-		"&euro;":  "€",
+		"&euro;": "€",
 		"&pound;": "£",
-		"&yen;":   "¥",
-		"&cent;":  "¢",
-		"&sect;":  "§",
-		"&deg;":   "°",
+		"&yen;":  "¥",
+		"&cent;": "¢",
+		"&sect;": "§",
+		"&deg;":  "°",
 	}
-
+	
 	for entity, replacement := range replacements {
 		s = strings.ReplaceAll(s, entity, replacement)
 	}
-
+	
 	return s
 }
 
 func extractLinks(html string) []string {
 	links := make([]string, 0)
 	lines := strings.Split(html, "\n")
-
+	
 	for _, line := range lines {
 		if strings.Contains(line, "href=") {
 			parts := strings.Split(line, "href=\"")
@@ -271,7 +367,7 @@ func extractLinks(html string) []string {
 			}
 		}
 	}
-
+	
 	return links
 }
 
@@ -293,7 +389,7 @@ func normalizeURL(rawURL string, base *url.URL) (string, error) {
 	if resolved.Scheme != "http" && resolved.Scheme != "https" {
 		return "", fmt.Errorf("неподдерживаемая схема: %s", resolved.Scheme)
 	}
-
+	
 	return resolved.String(), nil
 }
 
@@ -308,7 +404,7 @@ func shouldCheckLink(rawURL string) bool {
 	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return false
 	}
-
+	
 	return true
 }
 
@@ -330,7 +426,7 @@ func checkLink(ctx context.Context, client *http.Client, linkURL, userAgent stri
 	if resp.StatusCode >= 400 {
 		return resp.StatusCode, nil
 	}
-
+	
 	return resp.StatusCode, nil
 }
 
