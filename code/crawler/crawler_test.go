@@ -180,3 +180,383 @@ func TestAnalyze_NoBrokenLinks(t *testing.T) {
 		t.Errorf("Ожидалось 0 битых ссылок, получено %d", len(report.Pages[0].BrokenLinks))
 	}
 }
+func TestAnalyze_SEO_AllElements(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Title</title>
+    <meta name="description" content="Test Description">
+</head>
+<body>
+    <h1>Test H1</h1>
+    <a href="/page1">Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	if len(report.Pages) == 0 {
+		t.Fatal("Отчет не содержит страниц")
+	}
+
+	seo := report.Pages[0].SEO
+	if seo == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	if !seo.HasTitle {
+		t.Error("has_title должен быть true")
+	}
+	if seo.Title != "Test Title" {
+		t.Errorf("title ожидался 'Test Title', получен '%s'", seo.Title)
+	}
+
+	if !seo.HasDescription {
+		t.Error("has_description должен быть true")
+	}
+	if seo.Description != "Test Description" {
+		t.Errorf("description ожидался 'Test Description', получен '%s'", seo.Description)
+	}
+
+	if !seo.HasH1 {
+		t.Error("has_h1 должен быть true")
+	}
+	if seo.H1 != "Test H1" {
+		t.Errorf("h1 ожидался 'Test H1', получен '%s'", seo.H1)
+	}
+}
+
+func TestAnalyze_SEO_MissingElements(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+</head>
+<body>
+    <a href="/page1">Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	seo := report.Pages[0].SEO
+	if seo == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	if seo.HasTitle {
+		t.Error("has_title должен быть false")
+	}
+	if seo.Title != "" {
+		t.Errorf("title должен быть пустым, получен '%s'", seo.Title)
+	}
+
+	if seo.HasDescription {
+		t.Error("has_description должен быть false")
+	}
+	if seo.Description != "" {
+		t.Errorf("description должен быть пустым, получен '%s'", seo.Description)
+	}
+
+	if seo.HasH1 {
+		t.Error("has_h1 должен быть false")
+	}
+	if seo.H1 != "" {
+		t.Errorf("h1 должен быть пустым, получен '%s'", seo.H1)
+	}
+}
+
+func TestAnalyze_SEO_EmptyElements(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>   </title>
+    <meta name="description" content="   ">
+</head>
+<body>
+    <h1>   </h1>
+    <a href="/page1">Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	seo := report.Pages[0].SEO
+	if seo == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	if seo.HasTitle {
+		t.Error("has_title должен быть false для пустого title")
+	}
+	if seo.HasDescription {
+		t.Error("has_description должен быть false для пустого description")
+	}
+	if seo.HasH1 {
+		t.Error("has_h1 должен быть false для пустого h1")
+	}
+}
+
+func TestAnalyze_SEO_HTMLEntities(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test &amp; Title</title>
+    <meta name="description" content="Test &amp; Description &copy; 2024">
+</head>
+<body>
+    <h1>Test &amp; H1 &euro;100</h1>
+    <a href="/page1">Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	seo := report.Pages[0].SEO
+	if seo == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	expectedTitle := "Test & Title"
+	if seo.Title != expectedTitle {
+		t.Errorf("title ожидался '%s', получен '%s'", expectedTitle, seo.Title)
+	}
+
+	expectedDesc := "Test & Description © 2024"
+	if seo.Description != expectedDesc {
+		t.Errorf("description ожидался '%s', получен '%s'", expectedDesc, seo.Description)
+	}
+
+	expectedH1 := "Test & H1 €100"
+	if seo.H1 != expectedH1 {
+		t.Errorf("h1 ожидался '%s', получен '%s'", expectedH1, seo.H1)
+	}
+}
+
+func TestAnalyze_SEO_MultipleH1(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Title</title>
+</head>
+<body>
+    <h1>First H1</h1>
+    <h1>Second H1</h1>
+    <a href="/page1">Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	seo := report.Pages[0].SEO
+	if seo == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	if !seo.HasH1 {
+		t.Error("has_h1 должен быть true")
+	}
+	if seo.H1 != "First H1" {
+		t.Errorf("h1 должен быть первым заголовком, получен '%s'", seo.H1)
+	}
+}
+
+func TestAnalyze_SEO_WithBrokenLinks(t *testing.T) {
+	html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Title</title>
+    <meta name="description" content="Test Description">
+</head>
+<body>
+    <h1>Test H1</h1>
+    <a href="/working">Working Link</a>
+    <a href="/broken">Broken Link</a>
+</body>
+</html>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(html))
+		case "/working":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		case "/broken":
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Not Found"))
+		}
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:        server.URL,
+		Depth:      1,
+		Timeout:    5 * time.Second,
+		IndentJSON: true,
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	result, err := code.Analyze(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Не удалось распарсить JSON: %v", err)
+	}
+
+	page := report.Pages[0]
+	
+	if page.SEO == nil {
+		t.Fatal("SEO данные отсутствуют")
+	}
+
+	if !page.SEO.HasTitle {
+		t.Error("has_title должен быть true")
+	}
+	if page.SEO.Title != "Test Title" {
+		t.Errorf("title ожидался 'Test Title', получен '%s'", page.SEO.Title)
+	}
+
+	if len(page.BrokenLinks) == 0 {
+		t.Error("Ожидались битые ссылки")
+	}
+
+	foundBroken := false
+	for _, link := range page.BrokenLinks {
+		if strings.Contains(link.URL, "/broken") {
+			foundBroken = true
+			if link.StatusCode != 404 {
+				t.Errorf("Ожидался статус 404 для /broken, получен %d", link.StatusCode)
+			}
+			break
+		}
+	}
+	if !foundBroken {
+		t.Error("Ссылка /broken не была отмечена как битая")
+	}
+}

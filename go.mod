@@ -1,5 +1,7 @@
 module hexlet-go-crawler
 
-go 1.23.3
+go 1.24.0
 
 require github.com/urfave/cli/v3 v3.6.2
+
+require golang.org/x/net v0.50.0 // indirect
