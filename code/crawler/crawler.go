@@ -151,12 +151,11 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	taskChan := make(chan CrawlTask, 100)
 	resultChan := make(chan Page, 100)
 	errorChan := make(chan error, 100)
-	var wg sync.WaitGroup
-	
+	var workersWg sync.WaitGroup
 	for i := 0; i < opts.Concurrency; i++ {
-		wg.Add(1)
+		workersWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workersWg.Done()
 			for task := range taskChan {
 				select {
 				case <-ctx.Done():
@@ -168,36 +167,36 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 					
 					page, err := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
 					if err != nil {
-						errorChan <- err
+						select {
+						case errorChan <- err:
+						case <-ctx.Done():
+							return
+						}
 						continue
 					}
-					resultChan <- page
+					
+					select {
+					case resultChan <- page:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
 	}
-	
-	wg.Add(1)
+	taskChan <- CrawlTask{URL: opts.URL, Depth: 0}
+	visited[opts.URL] = true
 	go func() {
-		defer wg.Done()
-		taskChan <- CrawlTask{URL: opts.URL, Depth: 0}
-		visited[opts.URL] = true
-	}()
-	
-	go func() {
-		wg.Wait()
+		workersWg.Wait()
 		close(taskChan)
 		close(resultChan)
 		close(errorChan)
 	}()
 	
 	pagesMap := make(map[string]Page)
-	
 	linksExtractor := func(pageURL string, seo *SEO) []string {
-		links := make([]string, 0)
-		return links
+		return make([]string, 0)
 	}
-	
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,7 +209,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			
 			if page.Depth < opts.Depth {
 				for _, link := range linksExtractor(page.URL, page.SEO) {
-					absLink, err := normalizeURL(link, rootURL)
+					absLink, err := NormalizeURL(link, rootURL)
 					if err != nil {
 						continue
 					}
@@ -220,7 +219,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 						continue
 					}
 					
-					if isSameDomain(linkURL, rootURL) {
+					if IsSameDomain(linkURL, rootURL) {
 						visitedMu.Lock()
 						if !visited[absLink] {
 							visited[absLink] = true
@@ -275,7 +274,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	page.Status = "ok"
 	page.HTTPStatus = 200
 	
-	rawLinks := extractLinks(html)
+	rawLinks := ExtractLinks(html)
 	baseURL, err := url.Parse(pageURL)
 	if err != nil {
 		return page, nil
@@ -283,11 +282,11 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	
 	absoluteLinks := make([]string, 0)
 	for _, link := range rawLinks {
-		absLink, err := normalizeURL(link, baseURL)
+		absLink, err := NormalizeURL(link, baseURL)
 		if err != nil {
 			continue
 		}
-		if absLink != "" && shouldCheckLink(absLink) {
+		if absLink != "" && ShouldCheckLink(absLink) {
 			absoluteLinks = append(absoluteLinks, absLink)
 		}
 	}
@@ -298,7 +297,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			continue
 		}
 		
-		if !isSameDomain(linkURL, rootURL) {
+		if !IsSameDomain(linkURL, rootURL) {
 			continue
 		}
 		
@@ -320,7 +319,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	return page, nil
 }
 
-func isSameDomain(linkURL, rootURL *url.URL) bool {
+func IsSameDomain(linkURL, rootURL *url.URL) bool {
 	return linkURL.Host == rootURL.Host
 }
 
@@ -339,7 +338,7 @@ func extractSEO(htmlContent string) *SEO {
 	if titleStart != -1 && titleEnd != -1 && titleEnd > titleStart {
 		title := htmlContent[titleStart+7 : titleEnd]
 		title = strings.TrimSpace(title)
-		title = decodeHTMLEntities(title)
+		title = DecodeHTMLEntities(title)
 		if title != "" {
 			seo.HasTitle = true
 			seo.Title = title
@@ -354,7 +353,7 @@ func extractSEO(htmlContent string) *SEO {
 		if contentEnd != -1 {
 			description := htmlContent[contentStart : contentStart+contentEnd]
 			description = strings.TrimSpace(description)
-			description = decodeHTMLEntities(description)
+			description = DecodeHTMLEntities(description)
 			if description != "" {
 				seo.HasDescription = true
 				seo.Description = description
@@ -374,7 +373,7 @@ func extractSEO(htmlContent string) *SEO {
 			if gtPos != -1 {
 				h1Content = h1Content[gtPos+1 : h1End]
 				h1Content = strings.TrimSpace(h1Content)
-				h1Content = decodeHTMLEntities(h1Content)
+				h1Content = DecodeHTMLEntities(h1Content)
 				if h1Content != "" {
 					seo.HasH1 = true
 					seo.H1 = h1Content
@@ -386,7 +385,7 @@ func extractSEO(htmlContent string) *SEO {
 	return seo
 }
 
-func decodeHTMLEntities(s string) string {
+func DecodeHTMLEntities(s string) string {
 	replacements := map[string]string{
 		"&amp;":  "&",
 		"&lt;":   "<",
@@ -412,7 +411,7 @@ func decodeHTMLEntities(s string) string {
 	return s
 }
 
-func extractLinks(html string) []string {
+func ExtractLinks(html string) []string {
 	links := make([]string, 0)
 	lines := strings.Split(html, "\n")
 	
@@ -431,7 +430,7 @@ func extractLinks(html string) []string {
 	return links
 }
 
-func normalizeURL(rawURL string, base *url.URL) (string, error) {
+func NormalizeURL(rawURL string, base *url.URL) (string, error) {
 	if rawURL == "" {
 		return "", nil
 	}
@@ -453,7 +452,7 @@ func normalizeURL(rawURL string, base *url.URL) (string, error) {
 	return resolved.String(), nil
 }
 
-func shouldCheckLink(rawURL string) bool {
+func ShouldCheckLink(rawURL string) bool {
 	if rawURL == "" || strings.HasPrefix(rawURL, "#") {
 		return false
 	}
@@ -530,7 +529,7 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("Статус код: %d %s", resp.StatusCode, resp.Status)
 	}
 	contentType := resp.Header.Get("Content-Type")
-	if !isHTMLContent(contentType) {
+	if !IsHTMLContent(contentType) {
 		return "", fmt.Errorf("Не HTML контент: %s", contentType)
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -540,6 +539,6 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 	return string(body), nil
 }
 
-func isHTMLContent(contentType string) bool {
+func IsHTMLContent(contentType string) bool {
 	return len(contentType) >= 9 && contentType[:9] == "text/html"
 }
