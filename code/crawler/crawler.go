@@ -18,7 +18,7 @@ type SEO struct {
 	HasDescription bool   `json:"has_description"`
 	Description    string `json:"description"`
 	HasH1          bool   `json:"has_h1"`
-	H1             string `json:"h1,omitempty"`
+	H1             string `json:"h1"`
 }
 
 type Asset struct {
@@ -44,8 +44,8 @@ type Options struct {
 
 type BrokenLink struct {
 	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
-	Error      string `json:"error,omitempty"`
+	StatusCode int    `json:"status_code"`
+	Error      string `json:"error"`
 }
 
 type Page struct {
@@ -53,10 +53,10 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
-	SEO          *SEO         `json:"seo,omitempty"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Error        string       `json:"error"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
+	SEO          *SEO         `json:"seo"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -90,7 +90,7 @@ var (
 
 func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
 	var minInterval time.Duration
-	
+
 	if rps > 0 {
 		minInterval = time.Duration(float64(time.Second) / rps)
 	} else if delay > 0 {
@@ -98,7 +98,7 @@ func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
 	} else {
 		return nil
 	}
-	
+
 	return &RateLimiter{
 		minInterval: minInterval,
 		lastRequest: time.Now().Add(-minInterval),
@@ -109,13 +109,13 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 	if rl == nil {
 		return nil
 	}
-	
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	
+
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRequest)
-	
+
 	if elapsed < rl.minInterval {
 		waitTime := rl.minInterval - elapsed
 		select {
@@ -124,7 +124,7 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		case <-time.After(waitTime):
 		}
 	}
-	
+
 	rl.lastRequest = time.Now()
 	return nil
 }
@@ -144,39 +144,39 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Concurrency == 0 {
 		opts.Concurrency = 1
 	}
-	
+
 	if opts.RPS > 0 && opts.Delay > 0 {
 		opts.Delay = 0
 	}
-	
+
 	rootURL, err := url.Parse(opts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("Ошибка парсинга URL: %w", err)
 	}
-	
+
 	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
-	
+
 	report := Report{
 		RootURL:     opts.URL,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().UTC(),
 		Pages:       make([]Page, 0),
 	}
-	
+
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
-	
+
 	taskChan := make(chan CrawlTask, 100)
 	resultChan := make(chan Page, 100)
 	errorChan := make(chan error, 100)
-	
+
 	var workersWg sync.WaitGroup
 	var taskWg sync.WaitGroup
-	
+
 	assetMu.Lock()
 	assetCache = make(map[string]assetCacheItem)
 	assetMu.Unlock()
-	
+
 	for i := 0; i < opts.Concurrency; i++ {
 		workersWg.Add(1)
 		go func() {
@@ -189,7 +189,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 					if err := rateLimiter.Wait(ctx); err != nil {
 						return
 					}
-					
+
 					page, err := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
 					if err != nil {
 						select {
@@ -199,7 +199,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 						}
 						continue
 					}
-					
+
 					select {
 					case resultChan <- page:
 					case <-ctx.Done():
@@ -209,7 +209,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			}
 		}()
 	}
-	
+
 	taskWg.Add(1)
 	go func() {
 		defer taskWg.Done()
@@ -222,7 +222,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			return
 		}
 	}()
-	
+
 	go func() {
 		taskWg.Wait()
 		workersWg.Wait()
@@ -230,15 +230,15 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		close(resultChan)
 		close(errorChan)
 	}()
-	
+
 	pagesMap := make(map[string]Page)
-	
+
 	linksExtractor := func(pageURL string, seo *SEO) []string {
 		return make([]string, 0)
 	}
-	
+
 	activeTasks := 1
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -248,19 +248,19 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				goto FINISH
 			}
 			pagesMap[page.URL] = page
-			
+
 			if page.Depth < opts.Depth {
 				for _, link := range linksExtractor(page.URL, page.SEO) {
 					absLink, err := NormalizeURL(link, rootURL)
 					if err != nil {
 						continue
 					}
-					
+
 					linkURL, err := url.Parse(absLink)
 					if err != nil {
 						continue
 					}
-					
+
 					if IsSameDomain(linkURL, rootURL) {
 						visitedMu.Lock()
 						if !visited[absLink] {
@@ -283,28 +283,28 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		case err := <-errorChan:
 			fmt.Printf("Ошибка при обходе: %v\n", err)
 		}
-		
+
 		if activeTasks == 0 && len(taskChan) == 0 {
 			break
 		}
 	}
-	
+
 FINISH:
 	for _, page := range pagesMap {
 		report.Pages = append(report.Pages, page)
 	}
-	
+
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
 	} else {
 		jsonData, err = json.Marshal(report)
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("Ошибка JSON: %w", err)
 	}
-	
+
 	return jsonData, nil
 }
 
@@ -315,8 +315,9 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		DiscoveredAt: time.Now().UTC(),
 		BrokenLinks:  make([]BrokenLink, 0),
 		Assets:       make([]Asset, 0),
+		Error:        "",
 	}
-	
+
 	html, err := GetHTMLWithContext(ctx, pageURL)
 	if err != nil {
 		page.Status = "error"
@@ -324,39 +325,39 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		page.HTTPStatus = 0
 		return page, nil
 	}
-	
+
 	seoData := extractSEO(html)
 	page.SEO = seoData
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	
+
 	assetURLs := ExtractAssetURLs(html)
 	baseURL, err := url.Parse(pageURL)
 	if err != nil {
 		return page, nil
 	}
-	
+
 	for _, assetURL := range assetURLs {
 		absAssetURL, err := NormalizeURL(assetURL, baseURL)
 		if err != nil {
 			continue
 		}
-		
+
 		if !ShouldCheckAsset(absAssetURL) {
 			continue
 		}
-		
+
 		assetMu.RLock()
 		cached, exists := assetCache[absAssetURL]
 		assetMu.RUnlock()
-		
+
 		if exists {
 			page.Assets = append(page.Assets, cached.asset)
 			continue
 		}
-		
-		asset, err := fetchAsset(ctx, opts.HTTPClient, absAssetURL, opts.UserAgent)
-		
+
+		asset, err := FetchAsset(ctx, opts.HTTPClient, absAssetURL, opts.UserAgent)
+
 		assetMu.Lock()
 		if err != nil {
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: err}
@@ -364,12 +365,12 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
 		}
 		assetMu.Unlock()
-		
+
 		page.Assets = append(page.Assets, asset)
 	}
-	
+
 	rawLinks := extractLinks(html)
-	
+
 	absoluteLinks := make([]string, 0)
 	for _, link := range rawLinks {
 		absLink, err := NormalizeURL(link, baseURL)
@@ -380,38 +381,40 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			absoluteLinks = append(absoluteLinks, absLink)
 		}
 	}
-	
+
 	for _, link := range absoluteLinks {
 		linkURL, err := url.Parse(link)
 		if err != nil {
 			continue
 		}
-		
+
 		if !IsSameDomain(linkURL, rootURL) {
 			continue
 		}
-		
+
 		statusCode, err := checkLink(ctx, opts.HTTPClient, link, opts.UserAgent)
 		if err != nil || statusCode >= 400 {
 			brokenLink := BrokenLink{
-				URL: link,
+				URL:        link,
+				StatusCode: statusCode,
+				Error:      "",
 			}
 			if err != nil {
 				brokenLink.Error = err.Error()
 			} else {
-				brokenLink.StatusCode = statusCode
+				brokenLink.Error = fmt.Sprintf("HTTP %d", statusCode)
 			}
 			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
 	}
-	
+
 	return page, nil
 }
 
 func ExtractAssetURLs(html string) []string {
 	assets := make([]string, 0)
 	lines := strings.Split(html, "\n")
-	
+
 	for _, line := range lines {
 		if strings.Contains(line, "<img") && strings.Contains(line, "src=") {
 			parts := strings.Split(line, "src=\"")
@@ -422,7 +425,7 @@ func ExtractAssetURLs(html string) []string {
 				}
 			}
 		}
-		
+
 		if strings.Contains(line, "<script") && strings.Contains(line, "src=") {
 			parts := strings.Split(line, "src=\"")
 			if len(parts) > 1 {
@@ -432,7 +435,7 @@ func ExtractAssetURLs(html string) []string {
 				}
 			}
 		}
-		
+
 		if strings.Contains(line, "<link") && strings.Contains(line, "href=") && strings.Contains(line, "stylesheet") {
 			parts := strings.Split(line, "href=\"")
 			if len(parts) > 1 {
@@ -443,32 +446,32 @@ func ExtractAssetURLs(html string) []string {
 			}
 		}
 	}
-	
+
 	return assets
 }
 
 func GetAssetType(url string) string {
 	lowerURL := strings.ToLower(url)
-	
+
 	if strings.Contains(lowerURL, ".jpg") || strings.Contains(lowerURL, ".jpeg") ||
 		strings.Contains(lowerURL, ".png") || strings.Contains(lowerURL, ".gif") ||
 		strings.Contains(lowerURL, ".svg") || strings.Contains(lowerURL, ".webp") ||
 		strings.Contains(lowerURL, ".ico") || strings.Contains(lowerURL, ".bmp") {
 		return "image"
 	}
-	
+
 	if strings.Contains(lowerURL, ".js") || strings.Contains(lowerURL, ".mjs") {
 		return "script"
 	}
-	
+
 	if strings.Contains(lowerURL, ".css") {
 		return "style"
 	}
-	
+
 	return "other"
 }
 
-func fetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent string) (Asset, error) {
+func FetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent string) (Asset, error) {
 	asset := Asset{
 		URL:        assetURL,
 		Type:       GetAssetType(assetURL),
@@ -476,33 +479,33 @@ func fetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 		SizeBytes:  0,
 		Error:      "",
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", assetURL, nil)
 	if err != nil {
 		asset.Error = fmt.Sprintf("создание запроса: %v", err)
 		return asset, err
 	}
-	
+
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	} else {
 		req.Header.Set("User-Agent", "HexletGoCrawler/1.0")
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		asset.Error = err.Error()
 		return asset, err
 	}
 	defer resp.Body.Close()
-	
+
 	asset.StatusCode = resp.StatusCode
-	
+
 	if resp.StatusCode >= 400 {
 		asset.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		return asset, fmt.Errorf("HTTP error: %d", resp.StatusCode)
 	}
-	
+
 	if resp.ContentLength > 0 {
 		asset.SizeBytes = resp.ContentLength
 	} else {
@@ -513,7 +516,7 @@ func fetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 		}
 		asset.SizeBytes = int64(len(body))
 	}
-	
+
 	return asset, nil
 }
 
@@ -528,11 +531,14 @@ func ShouldCheckAsset(rawURL string) bool {
 	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return false
 	}
-	
+
 	return true
 }
 
 func IsSameDomain(linkURL, rootURL *url.URL) bool {
+	if linkURL == nil || rootURL == nil {
+		return false
+	}
 	return linkURL.Host == rootURL.Host
 }
 
@@ -545,19 +551,19 @@ func extractSEO(htmlContent string) *SEO {
 		HasH1:          false,
 		H1:             "",
 	}
-	
+
 	titleStart := strings.Index(htmlContent, "<title>")
 	titleEnd := strings.Index(htmlContent, "</title>")
 	if titleStart != -1 && titleEnd != -1 && titleEnd > titleStart {
 		title := htmlContent[titleStart+7 : titleEnd]
 		title = strings.TrimSpace(title)
-		title = decodeHTMLEntities(title)
+		title = DecodeHTMLEntities(title)
 		if title != "" {
 			seo.HasTitle = true
 			seo.Title = title
 		}
 	}
-	
+
 	descPattern := "<meta name=\"description\" content=\""
 	descStart := strings.Index(htmlContent, descPattern)
 	if descStart != -1 {
@@ -566,14 +572,14 @@ func extractSEO(htmlContent string) *SEO {
 		if contentEnd != -1 {
 			description := htmlContent[contentStart : contentStart+contentEnd]
 			description = strings.TrimSpace(description)
-			description = decodeHTMLEntities(description)
+			description = DecodeHTMLEntities(description)
 			if description != "" {
 				seo.HasDescription = true
 				seo.Description = description
 			}
 		}
 	}
-	
+
 	h1Start := strings.Index(htmlContent, "<h1>")
 	if h1Start == -1 {
 		h1Start = strings.Index(htmlContent, "<h1 ")
@@ -586,7 +592,7 @@ func extractSEO(htmlContent string) *SEO {
 			if gtPos != -1 {
 				h1Content = h1Content[gtPos+1 : h1End]
 				h1Content = strings.TrimSpace(h1Content)
-				h1Content = decodeHTMLEntities(h1Content)
+				h1Content = DecodeHTMLEntities(h1Content)
 				if h1Content != "" {
 					seo.HasH1 = true
 					seo.H1 = h1Content
@@ -594,40 +600,40 @@ func extractSEO(htmlContent string) *SEO {
 			}
 		}
 	}
-	
+
 	return seo
 }
 
-func decodeHTMLEntities(s string) string {
+func DecodeHTMLEntities(s string) string {
 	replacements := map[string]string{
-		"&amp;":  "&",
-		"&lt;":   "<",
-		"&gt;":   ">",
-		"&quot;": "\"",
-		"&#39;":  "'",
-		"&nbsp;": " ",
-		"&copy;": "©",
-		"&reg;":  "®",
+		"&amp;":   "&",
+		"&lt;":    "<",
+		"&gt;":    ">",
+		"&quot;":  "\"",
+		"&#39;":   "'",
+		"&nbsp;":  " ",
+		"&copy;":  "©",
+		"&reg;":   "®",
 		"&trade;": "™",
-		"&euro;": "€",
+		"&euro;":  "€",
 		"&pound;": "£",
-		"&yen;":  "¥",
-		"&cent;": "¢",
-		"&sect;": "§",
-		"&deg;":  "°",
+		"&yen;":   "¥",
+		"&cent;":  "¢",
+		"&sect;":  "§",
+		"&deg;":   "°",
 	}
-	
+
 	for entity, replacement := range replacements {
 		s = strings.ReplaceAll(s, entity, replacement)
 	}
-	
+
 	return s
 }
 
 func extractLinks(html string) []string {
 	links := make([]string, 0)
 	lines := strings.Split(html, "\n")
-	
+
 	for _, line := range lines {
 		if strings.Contains(line, "href=") && !strings.Contains(line, "<link") {
 			parts := strings.Split(line, "href=\"")
@@ -639,7 +645,7 @@ func extractLinks(html string) []string {
 			}
 		}
 	}
-	
+
 	return links
 }
 
@@ -661,7 +667,7 @@ func NormalizeURL(rawURL string, base *url.URL) (string, error) {
 	if resolved.Scheme != "http" && resolved.Scheme != "https" {
 		return "", fmt.Errorf("неподдерживаемая схема: %s", resolved.Scheme)
 	}
-	
+
 	return resolved.String(), nil
 }
 
@@ -676,7 +682,7 @@ func shouldCheckLink(rawURL string) bool {
 	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -698,7 +704,7 @@ func checkLink(ctx context.Context, client *http.Client, linkURL, userAgent stri
 	if resp.StatusCode >= 400 {
 		return resp.StatusCode, nil
 	}
-	
+
 	return resp.StatusCode, nil
 }
 

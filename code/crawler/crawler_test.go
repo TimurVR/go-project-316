@@ -3,14 +3,14 @@ package code_test
 import (
 	"context"
 	"encoding/json"
+	code "hexlet-go-crawler/code/crawler"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
-
-	code "hexlet-go-crawler/code/crawler"
 )
 
 func TestSuccess(t *testing.T) {
@@ -58,6 +58,428 @@ func TestInvalidURL(t *testing.T) {
 	_, err := code.Analyze(ctx, opts)
 	if err == nil {
 		t.Error("Ожидалась ошибка при пустом URL")
+	}
+}
+
+func TestJSONFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Example title</title>
+    <meta name="description" content="Example description">
+</head>
+<body>
+    <h1>Example H1</h1>
+    <a href="/missing">Missing Link</a>
+    <img src="/static/logo.png" alt="Logo">
+</body>
+</html>`
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(html))
+		case "/missing":
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("Not Found"))
+		case "/static/logo.png":
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Length", "12345")
+			w.WriteHeader(http.StatusOK)
+			w.Write(make([]byte, 12345))
+		}
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := context.Background()
+	result, err := code.Analyze(ctx, opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON: %v", err)
+	}
+
+	if report.RootURL != server.URL {
+		t.Errorf("root_url = %s, ожидался %s", report.RootURL, server.URL)
+	}
+	if report.Depth != 1 {
+		t.Errorf("depth = %d, ожидался 1", report.Depth)
+	}
+	if len(report.Pages) != 1 {
+		t.Fatalf("pages = %d, ожидался 1", len(report.Pages))
+	}
+
+	page := report.Pages[0]
+	if page.URL != server.URL {
+		t.Errorf("page.url = %s, ожидался %s", page.URL, server.URL)
+	}
+	if page.Depth != 0 {
+		t.Errorf("page.depth = %d, ожидался 0", page.Depth)
+	}
+	if page.HTTPStatus != 200 {
+		t.Errorf("page.http_status = %d, ожидался 200", page.HTTPStatus)
+	}
+	if page.Status != "ok" {
+		t.Errorf("page.status = %s, ожидался ok", page.Status)
+	}
+	if page.Error != "" {
+		t.Errorf("page.error = %s, ожидалась пустая строка", page.Error)
+	}
+
+	if page.SEO == nil {
+		t.Fatal("page.seo отсутствует")
+	}
+	if !page.SEO.HasTitle {
+		t.Error("seo.has_title должен быть true")
+	}
+	if page.SEO.Title != "Example title" {
+		t.Errorf("seo.title = %s, ожидался Example title", page.SEO.Title)
+	}
+	if !page.SEO.HasDescription {
+		t.Error("seo.has_description должен быть true")
+	}
+	if page.SEO.Description != "Example description" {
+		t.Errorf("seo.description = %s, ожидался Example description", page.SEO.Description)
+	}
+	if !page.SEO.HasH1 {
+		t.Error("seo.has_h1 должен быть true")
+	}
+	if page.SEO.H1 != "Example H1" {
+		t.Errorf("seo.h1 = %s, ожидался Example H1", page.SEO.H1)
+	}
+
+	if len(page.BrokenLinks) != 1 {
+		t.Fatalf("broken_links = %d, ожидался 1", len(page.BrokenLinks))
+	}
+	brokenLink := page.BrokenLinks[0]
+	if !strings.Contains(brokenLink.URL, "/missing") {
+		t.Errorf("broken_link.url = %s, ожидался URL с /missing", brokenLink.URL)
+	}
+	if brokenLink.StatusCode != 404 {
+		t.Errorf("broken_link.status_code = %d, ожидался 404", brokenLink.StatusCode)
+	}
+	if brokenLink.Error == "" {
+		t.Error("broken_link.error не должен быть пустым")
+	}
+
+	if len(page.Assets) != 1 {
+		t.Fatalf("assets = %d, ожидался 1", len(page.Assets))
+	}
+	asset := page.Assets[0]
+	if !strings.Contains(asset.URL, "/static/logo.png") {
+		t.Errorf("asset.url = %s, ожидался URL с /static/logo.png", asset.URL)
+	}
+	if asset.Type != "image" {
+		t.Errorf("asset.type = %s, ожидался image", asset.Type)
+	}
+	if asset.StatusCode != 200 {
+		t.Errorf("asset.status_code = %d, ожидался 200", asset.StatusCode)
+	}
+	if asset.SizeBytes != 12345 {
+		t.Errorf("asset.size_bytes = %d, ожидался 12345", asset.SizeBytes)
+	}
+	if asset.Error != "" {
+		t.Errorf("asset.error = %s, ожидалась пустая строка", asset.Error)
+	}
+}
+
+func TestJSONWithIndent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test</title>
+</head>
+<body>
+    <h1>Test</h1>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts1 := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		IndentJSON:  false,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	opts2 := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		IndentJSON:  true,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := context.Background()
+
+	result1, err := code.Analyze(ctx, opts1)
+	if err != nil {
+		t.Fatalf("Analyze без отступов вернул ошибку: %v", err)
+	}
+
+	result2, err := code.Analyze(ctx, opts2)
+	if err != nil {
+		t.Fatalf("Analyze с отступами вернул ошибку: %v", err)
+	}
+
+	// Парсим оба результата в структуры для сравнения содержимого
+	var report1, report2 code.Report
+	err = json.Unmarshal(result1, &report1)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON без отступов: %v", err)
+	}
+
+	err = json.Unmarshal(result2, &report2)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON с отступами: %v", err)
+	}
+
+	// Сравниваем структуры, а не строки JSON
+	if report1.RootURL != report2.RootURL {
+		t.Errorf("RootURL отличается: %s vs %s", report1.RootURL, report2.RootURL)
+	}
+	if report1.Depth != report2.Depth {
+		t.Errorf("Depth отличается: %d vs %d", report1.Depth, report2.Depth)
+	}
+	if len(report1.Pages) != len(report2.Pages) {
+		t.Errorf("Количество страниц отличается: %d vs %d", len(report1.Pages), len(report2.Pages))
+	}
+
+	// Проверяем форматирование
+	if len(result2) <= len(result1) {
+		t.Error("JSON с отступами должен быть длиннее")
+	}
+
+	if !strings.Contains(string(result2), "\n") {
+		t.Error("JSON с отступами должен содержать переводы строк")
+	}
+	if !strings.Contains(string(result2), "  ") {
+		t.Error("JSON с отступами должен содержать пробелы для отступов")
+	}
+}
+
+func TestJSONRequiredFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		html := `<!DOCTYPE html>
+<html>
+<head>
+</head>
+<body>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := context.Background()
+	result, err := code.Analyze(ctx, opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report map[string]interface{}
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON: %v", err)
+	}
+
+	requiredRootFields := []string{"root_url", "depth", "generated_at", "pages"}
+	for _, field := range requiredRootFields {
+		if _, exists := report[field]; !exists {
+			t.Errorf("Отсутствует обязательное поле root: %s", field)
+		}
+	}
+
+	pages, ok := report["pages"].([]interface{})
+	if !ok || len(pages) == 0 {
+		t.Fatal("Отсутствуют pages")
+	}
+
+	page, ok := pages[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("Некорректный формат page")
+	}
+
+	requiredPageFields := []string{"url", "depth", "http_status", "status", "error", "broken_links", "seo", "assets", "discovered_at"}
+	for _, field := range requiredPageFields {
+		if _, exists := page[field]; !exists {
+			t.Errorf("Отсутствует обязательное поле page: %s", field)
+		}
+	}
+
+	seo, ok := page["seo"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Некорректный формат seo")
+	}
+
+	requiredSEOFields := []string{"has_title", "title", "has_description", "description", "has_h1", "h1"}
+	for _, field := range requiredSEOFields {
+		if _, exists := seo[field]; !exists {
+			t.Errorf("Отсутствует обязательное поле seo: %s", field)
+		}
+	}
+
+	_, ok = page["assets"].([]interface{})
+	if !ok {
+		t.Fatal("Некорректный формат assets")
+	}
+
+	_, ok = page["broken_links"].([]interface{})
+	if !ok {
+		t.Fatal("Некорректный формат broken_links")
+	}
+}
+
+func TestJSONEmptyStrings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		html := `<!DOCTYPE html>
+<html>
+<head>
+</head>
+<body>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := context.Background()
+	result, err := code.Analyze(ctx, opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report code.Report
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON: %v", err)
+	}
+
+	if len(report.Pages) == 0 {
+		t.Fatal("Отчет не содержит страниц")
+	}
+
+	page := report.Pages[0]
+
+	if page.Error != "" {
+		t.Errorf("page.error должен быть пустой строкой, получен: %s", page.Error)
+	}
+
+	if page.SEO == nil {
+		t.Fatal("SEO отсутствует")
+	}
+
+	if page.SEO.Title != "" {
+		t.Errorf("seo.title должен быть пустой строкой, получен: %s", page.SEO.Title)
+	}
+	if page.SEO.Description != "" {
+		t.Errorf("seo.description должен быть пустой строкой, получен: %s", page.SEO.Description)
+	}
+	if page.SEO.H1 != "" {
+		t.Errorf("seo.h1 должен быть пустой строкой, получен: %s", page.SEO.H1)
+	}
+}
+
+func TestJSONTimeFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		html := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Test</title>
+</head>
+<body>
+    <h1>Test</h1>
+</body>
+</html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(html))
+	}))
+	defer server.Close()
+
+	opts := code.Options{
+		URL:         server.URL,
+		Depth:       1,
+		Concurrency: 1,
+		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := context.Background()
+	result, err := code.Analyze(ctx, opts)
+	if err != nil {
+		t.Fatalf("Analyze вернул ошибку: %v", err)
+	}
+
+	var report map[string]interface{}
+	err = json.Unmarshal(result, &report)
+	if err != nil {
+		t.Fatalf("Ошибка при разборе JSON: %v", err)
+	}
+
+	generatedAt, ok := report["generated_at"].(string)
+	if !ok {
+		t.Fatal("generated_at должен быть строкой")
+	}
+
+	_, err = time.Parse(time.RFC3339, generatedAt)
+	if err != nil {
+		t.Errorf("generated_at не в формате ISO8601: %s, ошибка: %v", generatedAt, err)
+	}
+
+	pages, ok := report["pages"].([]interface{})
+	if !ok || len(pages) == 0 {
+		t.Fatal("Отсутствуют pages")
+	}
+
+	page, ok := pages[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("Некорректный формат page")
+	}
+
+	discoveredAt, ok := page["discovered_at"].(string)
+	if !ok {
+		t.Fatal("discovered_at должен быть строкой")
+	}
+
+	_, err = time.Parse(time.RFC3339, discoveredAt)
+	if err != nil {
+		t.Errorf("discovered_at не в формате ISO8601: %s, ошибка: %v", discoveredAt, err)
 	}
 }
 
@@ -114,6 +536,9 @@ func TestBrokenLinks(t *testing.T) {
 			foundBroken = true
 			if link.StatusCode != 404 {
 				t.Errorf("Ожидался статус 404, получен %d", link.StatusCode)
+			}
+			if link.Error == "" {
+				t.Error("Для битой ссылки должна быть ошибка")
 			}
 		}
 		if strings.Contains(link.URL, "/working") {
@@ -264,6 +689,9 @@ func TestAssetExtraction(t *testing.T) {
 			if asset.SizeBytes != 1024 {
 				t.Errorf("style.css размер %d, ожидался 1024", asset.SizeBytes)
 			}
+			if asset.Error != "" {
+				t.Errorf("style.css содержит ошибку: %s", asset.Error)
+			}
 		case server.URL + "/script.js":
 			if asset.Type != "script" {
 				t.Errorf("script.js имеет тип %s, ожидался script", asset.Type)
@@ -285,9 +713,13 @@ func TestAssetExtraction(t *testing.T) {
 
 func TestAssetCache(t *testing.T) {
 	requestCount := 0
+	var mu sync.Mutex
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		requestCount++
+		mu.Unlock()
+
 		switch r.URL.Path {
 		case "/":
 			html := `<html>
@@ -343,8 +775,6 @@ func TestAssetCache(t *testing.T) {
 	}))
 	defer server.Close()
 
-	requestCount = 0
-
 	opts := code.Options{
 		URL:         server.URL,
 		Depth:       2,
@@ -359,6 +789,9 @@ func TestAssetCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze вернул ошибку: %v", err)
 	}
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	expectedRequests := 5
 	if requestCount != expectedRequests {
@@ -546,6 +979,7 @@ func TestNormalizeURL(t *testing.T) {
 		{"абсолютный URL", "http://test.com/page", "http://test.com/page", false},
 		{"относительный URL", "/page", "http://example.com/page", false},
 		{"пустой URL", "", "", false},
+		{"неподдерживаемая схема", "ftp://test.com", "", true},
 	}
 
 	for _, tt := range tests {
@@ -572,11 +1006,16 @@ func TestIsSameDomain(t *testing.T) {
 	}{
 		{"один домен", "http://example.com/page", true},
 		{"другой домен", "http://test.com/page", false},
+		{"поддомен", "http://sub.example.com", false},
+		{"nil URL", "", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			link, _ := url.Parse(tt.link)
+			var link *url.URL
+			if tt.link != "" {
+				link, _ = url.Parse(tt.link)
+			}
 			if got := code.IsSameDomain(link, root); got != tt.want {
 				t.Errorf("IsSameDomain() = %v, want %v", got, tt.want)
 			}
@@ -592,6 +1031,7 @@ func TestIsHTMLContent(t *testing.T) {
 	}{
 		{"text/html", "text/html; charset=utf-8", true},
 		{"text/plain", "text/plain", false},
+		{"application/json", "application/json", false},
 		{"пустая строка", "", false},
 	}
 
@@ -611,13 +1051,18 @@ func TestGetAssetType(t *testing.T) {
 		want string
 	}{
 		{"image jpg", "http://example.com/image.jpg", "image"},
+		{"image jpeg", "http://example.com/image.jpeg", "image"},
 		{"image png", "http://example.com/image.png", "image"},
 		{"image gif", "http://example.com/image.gif", "image"},
 		{"image svg", "http://example.com/image.svg", "image"},
+		{"image webp", "http://example.com/image.webp", "image"},
+		{"image ico", "http://example.com/favicon.ico", "image"},
+		{"image bmp", "http://example.com/image.bmp", "image"},
 		{"script js", "http://example.com/script.js", "script"},
 		{"script mjs", "http://example.com/script.mjs", "script"},
 		{"style css", "http://example.com/style.css", "style"},
 		{"other", "http://example.com/file.txt", "other"},
+		{"other no extension", "http://example.com/file", "other"},
 	}
 
 	for _, tt := range tests {
@@ -640,6 +1085,7 @@ func TestShouldCheckAsset(t *testing.T) {
 		{"http URL", "http://example.com/image.jpg", true},
 		{"https URL", "https://example.com/image.jpg", true},
 		{"ftp URL", "ftp://example.com/image.jpg", false},
+		{"относительный URL", "/image.jpg", true},
 	}
 
 	for _, tt := range tests {
@@ -655,18 +1101,56 @@ func TestExtractAssetURLs(t *testing.T) {
 	html := `<html>
 		<head>
 			<link rel="stylesheet" href="/style.css">
+			<link rel="stylesheet" href="https://cdn.com/theme.css">
 			<script src="/script.js"></script>
+			<script src="https://cdn.com/lib.js"></script>
 		</head>
 		<body>
 			<img src="/image1.jpg">
 			<img src="/image2.png">
+			<img src="https://cdn.com/logo.svg">
+			<a href="#anchor">Anchor</a>
 		</body>
 	</html>`
 
 	assets := code.ExtractAssetURLs(html)
 
-	if len(assets) != 4 {
-		t.Errorf("ExtractAssetURLs() вернул %d ассетов, ожидалось 4", len(assets))
+	expected := 7
+	if len(assets) != expected {
+		t.Errorf("ExtractAssetURLs() вернул %d ассетов, ожидалось %d", len(assets), expected)
+	}
+}
+
+func TestDecodeHTMLEntities(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"amp", "&amp;", "&"},
+		{"lt", "&lt;", "<"},
+		{"gt", "&gt;", ">"},
+		{"quot", "&quot;", "\""},
+		{"apos", "&#39;", "'"},
+		{"nbsp", "&nbsp;", " "},
+		{"copy", "&copy;", "©"},
+		{"reg", "&reg;", "®"},
+		{"trade", "&trade;", "™"},
+		{"euro", "&euro;", "€"},
+		{"pound", "&pound;", "£"},
+		{"yen", "&yen;", "¥"},
+		{"cent", "&cent;", "¢"},
+		{"sect", "&sect;", "§"},
+		{"deg", "&deg;", "°"},
+		{"смешанный", "Test &amp; Title &copy; 2024", "Test & Title © 2024"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := code.DecodeHTMLEntities(tt.input); got != tt.want {
+				t.Errorf("DecodeHTMLEntities() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -677,7 +1161,7 @@ func TestContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	opts := code.Options{
@@ -688,7 +1172,12 @@ func TestContextCancellation(t *testing.T) {
 	}
 
 	_, err := code.Analyze(ctx, opts)
-	if err != nil {
-		t.Logf("Получена ожидаемая ошибка: %v", err)
+	if err == nil {
+		select {
+		case <-ctx.Done():
+			t.Log("Контекст отменен, но Analyze не вернул ошибку")
+		default:
+			t.Error("Ожидалась ошибка при отмене контекста")
+		}
 	}
 }
