@@ -21,6 +21,14 @@ type SEO struct {
 	H1             string `json:"h1,omitempty"`
 }
 
+type Asset struct {
+	URL        string `json:"url"`
+	Type       string `json:"type"`
+	StatusCode int    `json:"status_code"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Error      string `json:"error"`
+}
+
 type Options struct {
 	URL         string
 	Depth       int
@@ -48,6 +56,7 @@ type Page struct {
 	Error        string       `json:"error,omitempty"`
 	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo,omitempty"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -64,11 +73,20 @@ type CrawlTask struct {
 }
 
 type RateLimiter struct {
-	ticker      *time.Ticker
 	lastRequest time.Time
 	minInterval time.Duration
 	mu          sync.Mutex
 }
+
+type assetCacheItem struct {
+	asset Asset
+	err   error
+}
+
+var (
+	assetCache = make(map[string]assetCacheItem)
+	assetMu    sync.RWMutex
+)
 
 func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
 	var minInterval time.Duration
@@ -151,7 +169,14 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	taskChan := make(chan CrawlTask, 100)
 	resultChan := make(chan Page, 100)
 	errorChan := make(chan error, 100)
+	
 	var workersWg sync.WaitGroup
+	var taskWg sync.WaitGroup
+	
+	assetMu.Lock()
+	assetCache = make(map[string]assetCacheItem)
+	assetMu.Unlock()
+	
 	for i := 0; i < opts.Concurrency; i++ {
 		workersWg.Add(1)
 		go func() {
@@ -184,9 +209,22 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			}
 		}()
 	}
-	taskChan <- CrawlTask{URL: opts.URL, Depth: 0}
-	visited[opts.URL] = true
+	
+	taskWg.Add(1)
 	go func() {
+		defer taskWg.Done()
+		select {
+		case taskChan <- CrawlTask{URL: opts.URL, Depth: 0}:
+			visitedMu.Lock()
+			visited[opts.URL] = true
+			visitedMu.Unlock()
+		case <-ctx.Done():
+			return
+		}
+	}()
+	
+	go func() {
+		taskWg.Wait()
 		workersWg.Wait()
 		close(taskChan)
 		close(resultChan)
@@ -194,9 +232,13 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}()
 	
 	pagesMap := make(map[string]Page)
+	
 	linksExtractor := func(pageURL string, seo *SEO) []string {
 		return make([]string, 0)
 	}
+	
+	activeTasks := 1
+	
 	for {
 		select {
 		case <-ctx.Done():
@@ -223,14 +265,27 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 						visitedMu.Lock()
 						if !visited[absLink] {
 							visited[absLink] = true
-							taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
+							activeTasks++
+							taskWg.Add(1)
+							go func(url string, depth int) {
+								defer taskWg.Done()
+								select {
+								case taskChan <- CrawlTask{URL: url, Depth: depth}:
+								case <-ctx.Done():
+								}
+							}(absLink, page.Depth+1)
 						}
 						visitedMu.Unlock()
 					}
 				}
 			}
+			activeTasks--
 		case err := <-errorChan:
 			fmt.Printf("Ошибка при обходе: %v\n", err)
+		}
+		
+		if activeTasks == 0 && len(taskChan) == 0 {
+			break
 		}
 	}
 	
@@ -259,6 +314,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		BrokenLinks:  make([]BrokenLink, 0),
+		Assets:       make([]Asset, 0),
 	}
 	
 	html, err := GetHTMLWithContext(ctx, pageURL)
@@ -274,11 +330,45 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	page.Status = "ok"
 	page.HTTPStatus = 200
 	
-	rawLinks := ExtractLinks(html)
+	assetURLs := ExtractAssetURLs(html)
 	baseURL, err := url.Parse(pageURL)
 	if err != nil {
 		return page, nil
 	}
+	
+	for _, assetURL := range assetURLs {
+		absAssetURL, err := NormalizeURL(assetURL, baseURL)
+		if err != nil {
+			continue
+		}
+		
+		if !ShouldCheckAsset(absAssetURL) {
+			continue
+		}
+		
+		assetMu.RLock()
+		cached, exists := assetCache[absAssetURL]
+		assetMu.RUnlock()
+		
+		if exists {
+			page.Assets = append(page.Assets, cached.asset)
+			continue
+		}
+		
+		asset, err := fetchAsset(ctx, opts.HTTPClient, absAssetURL, opts.UserAgent)
+		
+		assetMu.Lock()
+		if err != nil {
+			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: err}
+		} else {
+			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
+		}
+		assetMu.Unlock()
+		
+		page.Assets = append(page.Assets, asset)
+	}
+	
+	rawLinks := extractLinks(html)
 	
 	absoluteLinks := make([]string, 0)
 	for _, link := range rawLinks {
@@ -286,7 +376,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		if err != nil {
 			continue
 		}
-		if absLink != "" && ShouldCheckLink(absLink) {
+		if absLink != "" && shouldCheckLink(absLink) {
 			absoluteLinks = append(absoluteLinks, absLink)
 		}
 	}
@@ -300,7 +390,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		if !IsSameDomain(linkURL, rootURL) {
 			continue
 		}
-		
 		
 		statusCode, err := checkLink(ctx, opts.HTTPClient, link, opts.UserAgent)
 		if err != nil || statusCode >= 400 {
@@ -317,6 +406,130 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	}
 	
 	return page, nil
+}
+
+func ExtractAssetURLs(html string) []string {
+	assets := make([]string, 0)
+	lines := strings.Split(html, "\n")
+	
+	for _, line := range lines {
+		if strings.Contains(line, "<img") && strings.Contains(line, "src=") {
+			parts := strings.Split(line, "src=\"")
+			if len(parts) > 1 {
+				src := strings.Split(parts[1], "\"")[0]
+				if src != "" && !strings.HasPrefix(src, "#") {
+					assets = append(assets, src)
+				}
+			}
+		}
+		
+		if strings.Contains(line, "<script") && strings.Contains(line, "src=") {
+			parts := strings.Split(line, "src=\"")
+			if len(parts) > 1 {
+				src := strings.Split(parts[1], "\"")[0]
+				if src != "" && !strings.HasPrefix(src, "#") {
+					assets = append(assets, src)
+				}
+			}
+		}
+		
+		if strings.Contains(line, "<link") && strings.Contains(line, "href=") && strings.Contains(line, "stylesheet") {
+			parts := strings.Split(line, "href=\"")
+			if len(parts) > 1 {
+				href := strings.Split(parts[1], "\"")[0]
+				if href != "" && !strings.HasPrefix(href, "#") {
+					assets = append(assets, href)
+				}
+			}
+		}
+	}
+	
+	return assets
+}
+
+func GetAssetType(url string) string {
+	lowerURL := strings.ToLower(url)
+	
+	if strings.Contains(lowerURL, ".jpg") || strings.Contains(lowerURL, ".jpeg") ||
+		strings.Contains(lowerURL, ".png") || strings.Contains(lowerURL, ".gif") ||
+		strings.Contains(lowerURL, ".svg") || strings.Contains(lowerURL, ".webp") ||
+		strings.Contains(lowerURL, ".ico") || strings.Contains(lowerURL, ".bmp") {
+		return "image"
+	}
+	
+	if strings.Contains(lowerURL, ".js") || strings.Contains(lowerURL, ".mjs") {
+		return "script"
+	}
+	
+	if strings.Contains(lowerURL, ".css") {
+		return "style"
+	}
+	
+	return "other"
+}
+
+func fetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent string) (Asset, error) {
+	asset := Asset{
+		URL:        assetURL,
+		Type:       GetAssetType(assetURL),
+		StatusCode: 0,
+		SizeBytes:  0,
+		Error:      "",
+	}
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", assetURL, nil)
+	if err != nil {
+		asset.Error = fmt.Sprintf("создание запроса: %v", err)
+		return asset, err
+	}
+	
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	} else {
+		req.Header.Set("User-Agent", "HexletGoCrawler/1.0")
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		asset.Error = err.Error()
+		return asset, err
+	}
+	defer resp.Body.Close()
+	
+	asset.StatusCode = resp.StatusCode
+	
+	if resp.StatusCode >= 400 {
+		asset.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		return asset, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+	
+	if resp.ContentLength > 0 {
+		asset.SizeBytes = resp.ContentLength
+	} else {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			asset.Error = fmt.Sprintf("чтение тела: %v", err)
+			return asset, err
+		}
+		asset.SizeBytes = int64(len(body))
+	}
+	
+	return asset, nil
+}
+
+func ShouldCheckAsset(rawURL string) bool {
+	if rawURL == "" || strings.HasPrefix(rawURL, "#") {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	
+	return true
 }
 
 func IsSameDomain(linkURL, rootURL *url.URL) bool {
@@ -338,7 +551,7 @@ func extractSEO(htmlContent string) *SEO {
 	if titleStart != -1 && titleEnd != -1 && titleEnd > titleStart {
 		title := htmlContent[titleStart+7 : titleEnd]
 		title = strings.TrimSpace(title)
-		title = DecodeHTMLEntities(title)
+		title = decodeHTMLEntities(title)
 		if title != "" {
 			seo.HasTitle = true
 			seo.Title = title
@@ -353,7 +566,7 @@ func extractSEO(htmlContent string) *SEO {
 		if contentEnd != -1 {
 			description := htmlContent[contentStart : contentStart+contentEnd]
 			description = strings.TrimSpace(description)
-			description = DecodeHTMLEntities(description)
+			description = decodeHTMLEntities(description)
 			if description != "" {
 				seo.HasDescription = true
 				seo.Description = description
@@ -373,7 +586,7 @@ func extractSEO(htmlContent string) *SEO {
 			if gtPos != -1 {
 				h1Content = h1Content[gtPos+1 : h1End]
 				h1Content = strings.TrimSpace(h1Content)
-				h1Content = DecodeHTMLEntities(h1Content)
+				h1Content = decodeHTMLEntities(h1Content)
 				if h1Content != "" {
 					seo.HasH1 = true
 					seo.H1 = h1Content
@@ -385,7 +598,7 @@ func extractSEO(htmlContent string) *SEO {
 	return seo
 }
 
-func DecodeHTMLEntities(s string) string {
+func decodeHTMLEntities(s string) string {
 	replacements := map[string]string{
 		"&amp;":  "&",
 		"&lt;":   "<",
@@ -411,16 +624,16 @@ func DecodeHTMLEntities(s string) string {
 	return s
 }
 
-func ExtractLinks(html string) []string {
+func extractLinks(html string) []string {
 	links := make([]string, 0)
 	lines := strings.Split(html, "\n")
 	
 	for _, line := range lines {
-		if strings.Contains(line, "href=") {
+		if strings.Contains(line, "href=") && !strings.Contains(line, "<link") {
 			parts := strings.Split(line, "href=\"")
 			if len(parts) > 1 {
 				href := strings.Split(parts[1], "\"")[0]
-				if href != "" && !strings.HasPrefix(href, "#") {
+				if href != "" && !strings.HasPrefix(href, "#") && !strings.Contains(href, ".css") && !strings.Contains(href, ".js") && !strings.Contains(href, ".jpg") && !strings.Contains(href, ".png") && !strings.Contains(href, ".gif") {
 					links = append(links, href)
 				}
 			}
@@ -452,7 +665,7 @@ func NormalizeURL(rawURL string, base *url.URL) (string, error) {
 	return resolved.String(), nil
 }
 
-func ShouldCheckLink(rawURL string) bool {
+func shouldCheckLink(rawURL string) bool {
 	if rawURL == "" || strings.HasPrefix(rawURL, "#") {
 		return false
 	}
@@ -542,3 +755,4 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 func IsHTMLContent(contentType string) bool {
 	return len(contentType) >= 9 && contentType[:9] == "text/html"
 }
+
