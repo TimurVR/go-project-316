@@ -1,4 +1,4 @@
-module hexlet-go-crawler
+module project
 
 go 1.24.0
 

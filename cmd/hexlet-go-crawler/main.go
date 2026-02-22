@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	code "hexlet-go-crawler/code/crawler"
 	"log"
 	"os"
+	code "project/code/crawler"
 	"time"
 
 	"github.com/urfave/cli/v3"

@@ -3,7 +3,7 @@ package code_test
 import (
 	"context"
 	"encoding/json"
-	code "hexlet-go-crawler/code/crawler"
+	code "project/code/crawler"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
