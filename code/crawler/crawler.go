@@ -26,6 +26,7 @@ type Options struct {
 	Depth       int
 	Retries     int
 	Delay       time.Duration
+	RPS         float64
 	Timeout     time.Duration
 	UserAgent   string
 	Concurrency int
@@ -62,6 +63,54 @@ type CrawlTask struct {
 	Depth int
 }
 
+type RateLimiter struct {
+	ticker      *time.Ticker
+	lastRequest time.Time
+	minInterval time.Duration
+	mu          sync.Mutex
+}
+
+func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
+	var minInterval time.Duration
+	
+	if rps > 0 {
+		minInterval = time.Duration(float64(time.Second) / rps)
+	} else if delay > 0 {
+		minInterval = delay
+	} else {
+		return nil
+	}
+	
+	return &RateLimiter{
+		minInterval: minInterval,
+		lastRequest: time.Now().Add(-minInterval),
+	}
+}
+
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	if rl == nil {
+		return nil
+	}
+	
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRequest)
+	
+	if elapsed < rl.minInterval {
+		waitTime := rl.minInterval - elapsed
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitTime):
+		}
+	}
+	
+	rl.lastRequest = time.Now()
+	return nil
+}
+
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("URL обязателен")
@@ -78,10 +127,16 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		opts.Concurrency = 1
 	}
 	
+	if opts.RPS > 0 && opts.Delay > 0 {
+		opts.Delay = 0
+	}
+	
 	rootURL, err := url.Parse(opts.URL)
 	if err != nil {
 		return nil, fmt.Errorf("Ошибка парсинга URL: %w", err)
 	}
+	
+	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
 	
 	report := Report{
 		RootURL:     opts.URL,
@@ -107,6 +162,10 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				case <-ctx.Done():
 					return
 				default:
+					if err := rateLimiter.Wait(ctx); err != nil {
+						return
+					}
+					
 					page, err := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
 					if err != nil {
 						errorChan <- err
@@ -134,6 +193,11 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	
 	pagesMap := make(map[string]Page)
 	
+	linksExtractor := func(pageURL string, seo *SEO) []string {
+		links := make([]string, 0)
+		return links
+	}
+	
 	for {
 		select {
 		case <-ctx.Done():
@@ -145,7 +209,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			pagesMap[page.URL] = page
 			
 			if page.Depth < opts.Depth {
-				for _, link := range extractLinksFromPage(page.URL, page.SEO) {
+				for _, link := range linksExtractor(page.URL, page.SEO) {
 					absLink, err := normalizeURL(link, rootURL)
 					if err != nil {
 						continue
@@ -238,6 +302,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			continue
 		}
 		
+		
 		statusCode, err := checkLink(ctx, opts.HTTPClient, link, opts.UserAgent)
 		if err != nil || statusCode >= 400 {
 			brokenLink := BrokenLink{
@@ -253,11 +318,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	}
 	
 	return page, nil
-}
-
-func extractLinksFromPage(pageURL string, seo *SEO) []string {
-	links := make([]string, 0)
-	return links
 }
 
 func isSameDomain(linkURL, rootURL *url.URL) bool {
@@ -361,7 +421,7 @@ func extractLinks(html string) []string {
 			parts := strings.Split(line, "href=\"")
 			if len(parts) > 1 {
 				href := strings.Split(parts[1], "\"")[0]
-				if href != "" {
+				if href != "" && !strings.HasPrefix(href, "#") {
 					links = append(links, href)
 				}
 			}
