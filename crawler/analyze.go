@@ -174,7 +174,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited[rawRoot] = true
 	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
-	
+
 	pagesMap := make(map[string]Page)
 	activeTasks := 1
 
@@ -190,8 +190,10 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 					for _, link := range extractLinks(html) {
 						baseURL, _ := url.Parse(page.URL)
 						absLink, _ := NormalizeURL(link, baseURL)
-						if absLink == "" { continue }
-						
+						if absLink == "" {
+							continue
+						}
+
 						linkURL, _ := url.Parse(absLink)
 						if IsSameDomain(linkURL, rootURL) {
 							visitedMu.Lock()
@@ -376,12 +378,14 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		var assets []Asset
 		for _, assetURL := range rawAssets {
 			abs, err := NormalizeURL(assetURL, baseURL)
-			if err != nil || !ShouldCheckAsset(abs) { continue }
-			
+			if err != nil || !ShouldCheckAsset(abs) {
+				continue
+			}
+
 			assetMu.RLock()
 			cached, exists := assetCache[abs]
 			assetMu.RUnlock()
-			
+
 			if exists {
 				assets = append(assets, cached.asset)
 				continue
@@ -395,7 +399,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 				assets = append(assets, asset)
 			}
 		}
-		
+
 		sort.Slice(assets, func(i, j int) bool {
 			if assets[i].Type != assets[j].Type {
 				return assets[i].Type < assets[j].Type
