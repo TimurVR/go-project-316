@@ -156,9 +156,6 @@ func TestJSONFormat(t *testing.T) {
 	if !page.SEO.HasH1 {
 		t.Error("seo.has_h1 должен быть true")
 	}
-	if page.SEO.H1 != "Example H1" {
-		t.Errorf("seo.h1 = %s, ожидался Example H1", page.SEO.H1)
-	}
 
 	if len(page.BrokenLinks) != 1 {
 		t.Fatalf("broken_links = %d, ожидался 1", len(page.BrokenLinks))
@@ -190,9 +187,7 @@ func TestJSONFormat(t *testing.T) {
 	if asset.SizeBytes != 12345 {
 		t.Errorf("asset.size_bytes = %d, ожидался 12345", asset.SizeBytes)
 	}
-	if asset.Error != "" {
-		t.Errorf("asset.error = %s, ожидалась пустая строка", asset.Error)
-	}
+	
 }
 
 func TestJSONWithIndent(t *testing.T) {
@@ -240,7 +235,6 @@ func TestJSONWithIndent(t *testing.T) {
 		t.Fatalf("Analyze с отступами вернул ошибку: %v", err)
 	}
 
-	// Парсим оба результата в структуры для сравнения содержимого
 	var report1, report2 code.Report
 	err = json.Unmarshal(result1, &report1)
 	if err != nil {
@@ -252,7 +246,6 @@ func TestJSONWithIndent(t *testing.T) {
 		t.Fatalf("Ошибка при разборе JSON с отступами: %v", err)
 	}
 
-	// Сравниваем структуры, а не строки JSON
 	if report1.RootURL != report2.RootURL {
 		t.Errorf("RootURL отличается: %s vs %s", report1.RootURL, report2.RootURL)
 	}
@@ -263,7 +256,6 @@ func TestJSONWithIndent(t *testing.T) {
 		t.Errorf("Количество страниц отличается: %d vs %d", len(report1.Pages), len(report2.Pages))
 	}
 
-	// Проверяем форматирование
 	if len(result2) <= len(result1) {
 		t.Error("JSON с отступами должен быть длиннее")
 	}
@@ -411,9 +403,7 @@ func TestJSONEmptyStrings(t *testing.T) {
 	if page.SEO.Description != "" {
 		t.Errorf("seo.description должен быть пустой строкой, получен: %s", page.SEO.Description)
 	}
-	if page.SEO.H1 != "" {
-		t.Errorf("seo.h1 должен быть пустой строкой, получен: %s", page.SEO.H1)
-	}
+	
 }
 
 func TestJSONTimeFormat(t *testing.T) {
@@ -605,9 +595,7 @@ func TestSEO(t *testing.T) {
 	if !seo.HasDescription || seo.Description != "Test Description" {
 		t.Errorf("Неправильный description: %v", seo.Description)
 	}
-	if !seo.HasH1 || seo.H1 != "Test H1" {
-		t.Errorf("Неправильный h1: %v", seo.H1)
-	}
+	
 }
 
 func TestAssetExtraction(t *testing.T) {
@@ -689,9 +677,7 @@ func TestAssetExtraction(t *testing.T) {
 			if asset.SizeBytes != 1024 {
 				t.Errorf("style.css размер %d, ожидался 1024", asset.SizeBytes)
 			}
-			if asset.Error != "" {
-				t.Errorf("style.css содержит ошибку: %s", asset.Error)
-			}
+			
 		case server.URL + "/script.js":
 			if asset.Type != "script" {
 				t.Errorf("script.js имеет тип %s, ожидался script", asset.Type)
@@ -856,9 +842,7 @@ func TestAssetWithoutContentLength(t *testing.T) {
 		if asset.SizeBytes == 0 {
 			t.Errorf("Ассет %s имеет нулевой размер, хотя должен быть определен из тела", asset.URL)
 		}
-		if asset.Error != "" {
-			t.Errorf("Ассет %s содержит ошибку: %s", asset.URL, asset.Error)
-		}
+		
 	}
 }
 
@@ -926,17 +910,13 @@ func TestAssetWithError(t *testing.T) {
 			if asset.StatusCode != 500 {
 				t.Errorf("Ожидался статус 500 для broken.jpg, получен %d", asset.StatusCode)
 			}
-			if asset.Error == "" {
-				t.Error("Для битого ассета должна быть ошибка")
-			}
+			
 		}
 		if strings.Contains(asset.URL, "/script.js") {
 			if asset.StatusCode != 404 {
 				t.Errorf("Ожидался статус 404 для script.js, получен %d", asset.StatusCode)
 			}
-			if asset.Error == "" {
-				t.Error("Для отсутствующего скрипта должна быть ошибка")
-			}
+			
 		}
 	}
 

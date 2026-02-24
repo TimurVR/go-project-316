@@ -25,7 +25,6 @@ type Asset struct {
 	Type       string `json:"type"`
 	StatusCode int    `json:"status_code"`
 	SizeBytes  int64  `json:"size_bytes"`
-	Error      string `json:"error"`
 }
 
 type Options struct {
@@ -52,10 +51,10 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
+	Error        string       `json:"error,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -291,9 +290,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 FINISH:
 	for _, page := range pagesMap {
-		if page.SEO == nil {
-			page.SEO = &SEO{}
-		}
 		report.Pages = append(report.Pages, page)
 	}
 
@@ -316,7 +312,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		URL:          pageURL,
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
-		Error:        "",
 		SEO:          &SEO{},
 	}
 
@@ -327,9 +322,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		page.HTTPStatus = 0
 		return page, nil
 	}
-
-	page.BrokenLinks = make([]BrokenLink, 0)
-	page.Assets = make([]Asset, 0)
 
 	seoData := extractSEO(html)
 	if seoData != nil {
@@ -345,6 +337,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		return page, nil
 	}
 
+	var assets []Asset
 	for _, assetURL := range assetURLs {
 		absAssetURL, err := NormalizeURL(assetURL, baseURL)
 		if err != nil {
@@ -360,21 +353,20 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		assetMu.RUnlock()
 
 		if exists {
-			page.Assets = append(page.Assets, cached.asset)
+			assets = append(assets, cached.asset)
 			continue
 		}
 
 		asset, err := FetchAsset(ctx, opts.HTTPClient, absAssetURL, opts.UserAgent)
-
-		assetMu.Lock()
-		if err != nil {
-			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: err}
-		} else {
+		if err == nil {
+			assetMu.Lock()
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
+			assetMu.Unlock()
+			assets = append(assets, asset)
 		}
-		assetMu.Unlock()
-
-		page.Assets = append(page.Assets, asset)
+	}
+	if len(assets) > 0 {
+		page.Assets = assets
 	}
 
 	rawLinks := extractLinks(html)
@@ -390,6 +382,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		}
 	}
 
+	var brokenLinks []BrokenLink
 	for _, link := range absoluteLinks {
 		linkURL, err := url.Parse(link)
 		if err != nil {
@@ -405,15 +398,17 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			brokenLink := BrokenLink{
 				URL:        link,
 				StatusCode: statusCode,
-				Error:      "",
 			}
 			if err != nil {
 				brokenLink.Error = err.Error()
 			} else {
 				brokenLink.Error = fmt.Sprintf("HTTP %d", statusCode)
 			}
-			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
+			brokenLinks = append(brokenLinks, brokenLink)
 		}
+	}
+	if len(brokenLinks) > 0 {
+		page.BrokenLinks = brokenLinks
 	}
 
 	return page, nil
@@ -485,12 +480,10 @@ func FetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 		Type:       GetAssetType(assetURL),
 		StatusCode: 0,
 		SizeBytes:  0,
-		Error:      "",
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", assetURL, nil)
 	if err != nil {
-		asset.Error = fmt.Sprintf("создание запроса: %v", err)
 		return asset, err
 	}
 
@@ -502,7 +495,6 @@ func FetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 
 	resp, err := client.Do(req)
 	if err != nil {
-		asset.Error = err.Error()
 		return asset, err
 	}
 	defer resp.Body.Close()
@@ -510,7 +502,6 @@ func FetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 	asset.StatusCode = resp.StatusCode
 
 	if resp.StatusCode >= 400 {
-		asset.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		return asset, fmt.Errorf("HTTP error: %d", resp.StatusCode)
 	}
 
@@ -519,7 +510,6 @@ func FetchAsset(ctx context.Context, client *http.Client, assetURL, userAgent st
 	} else {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			asset.Error = fmt.Sprintf("чтение тела: %v", err)
 			return asset, err
 		}
 		asset.SizeBytes = int64(len(body))
@@ -742,15 +732,15 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Статус код: %d %s", resp.StatusCode, resp.Status)
+		return "", fmt.Errorf("статус код: %d", resp.StatusCode)
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if !IsHTMLContent(contentType) {
-		return "", fmt.Errorf("Не HTML контент: %s", contentType)
+		return "", fmt.Errorf("не HTML контент: %s", contentType)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("Чтение тела: %w", err)
+		return "", fmt.Errorf("чтение тела: %w", err)
 	}
 	return string(body), nil
 }
