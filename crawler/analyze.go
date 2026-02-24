@@ -52,9 +52,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -313,6 +313,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
+		Assets:       make([]Asset, 0),
+		BrokenLinks:  make([]BrokenLink, 0),
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL)
@@ -337,7 +339,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		return page, nil
 	}
 
-	var assets []Asset
 	for _, assetURL := range assetURLs {
 		absAssetURL, err := NormalizeURL(assetURL, baseURL)
 		if err != nil {
@@ -353,7 +354,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		assetMu.RUnlock()
 
 		if exists {
-			assets = append(assets, cached.asset)
+			page.Assets = append(page.Assets, cached.asset)
 			continue
 		}
 
@@ -362,11 +363,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			assetMu.Lock()
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
 			assetMu.Unlock()
-			assets = append(assets, asset)
+			page.Assets = append(page.Assets, asset)
 		}
-	}
-	if len(assets) > 0 {
-		page.Assets = assets
 	}
 
 	rawLinks := extractLinks(html)
@@ -382,7 +380,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		}
 	}
 
-	var brokenLinks []BrokenLink
 	for _, link := range absoluteLinks {
 		linkURL, err := url.Parse(link)
 		if err != nil {
@@ -404,11 +401,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			} else {
 				brokenLink.Error = fmt.Sprintf("HTTP %d", statusCode)
 			}
-			brokenLinks = append(brokenLinks, brokenLink)
+			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
-	}
-	if len(brokenLinks) > 0 {
-		page.BrokenLinks = brokenLinks
 	}
 
 	return page, nil
