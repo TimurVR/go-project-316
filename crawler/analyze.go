@@ -55,9 +55,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
+	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -166,7 +166,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				if err := rateLimiter.Wait(ctx); err != nil {
 					return
 				}
-				page, _ := crawlPage(ctx, opts, task.URL, task.Depth)
+				page, _ := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
 				resultChan <- page
 			}
 		}()
@@ -220,10 +220,14 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return report.Pages[i].URL < report.Pages[j].URL
 	})
 
+	var jsonData []byte
+	var err error
 	if opts.IndentJSON {
-		return json.MarshalIndent(report, "", "  ")
+		jsonData, err = json.MarshalIndent(report, "", "  ")
+	} else {
+		jsonData, err = json.Marshal(report)
 	}
-	return json.Marshal(report)
+	return jsonData, err
 }
 
 func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, error) {
@@ -345,7 +349,7 @@ func ShouldCheckAsset(urlStr string) bool {
 	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
 }
 
-func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Page, error) {
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, rootURL *url.URL) (Page, error) {
 	page := Page{
 		URL:          pageURL,
 		Depth:        depth,
