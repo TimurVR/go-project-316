@@ -232,11 +232,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}()
 
 	pagesMap := make(map[string]Page)
-
-	linksExtractor := func(pageURL string, seo *SEO) []string {
-		return make([]string, 0)
-	}
-
 	activeTasks := 1
 
 	for {
@@ -250,32 +245,38 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			pagesMap[page.URL] = page
 
 			if page.Depth < opts.Depth {
-				for _, link := range linksExtractor(page.URL, page.SEO) {
-					absLink, err := NormalizeURL(link, rootURL)
-					if err != nil {
-						continue
-					}
-
-					linkURL, err := url.Parse(absLink)
-					if err != nil {
-						continue
-					}
-
-					if IsSameDomain(linkURL, rootURL) {
-						visitedMu.Lock()
-						if !visited[absLink] {
-							visited[absLink] = true
-							activeTasks++
-							taskWg.Add(1)
-							go func(url string, depth int) {
-								defer taskWg.Done()
-								select {
-								case taskChan <- CrawlTask{URL: url, Depth: depth}:
-								case <-ctx.Done():
-								}
-							}(absLink, page.Depth+1)
+				html, err := GetHTMLWithContext(ctx, page.URL)
+				if err == nil {
+					rawLinks := extractLinks(html)
+					
+					for _, link := range rawLinks {
+						pageURL, _ := url.Parse(page.URL)
+						absLink, err := NormalizeURL(link, pageURL)
+						if err != nil {
+							continue
 						}
-						visitedMu.Unlock()
+
+						linkURL, err := url.Parse(absLink)
+						if err != nil {
+							continue
+						}
+
+						if IsSameDomain(linkURL, rootURL) {
+							visitedMu.Lock()
+							if !visited[absLink] {
+								visited[absLink] = true
+								activeTasks++
+								taskWg.Add(1)
+								go func(url string, depth int) {
+									defer taskWg.Done()
+									select {
+									case taskChan <- CrawlTask{URL: url, Depth: depth}:
+									case <-ctx.Done():
+									}
+								}(absLink, page.Depth+1)
+							}
+							visitedMu.Unlock()
+						}
 					}
 				}
 			}
