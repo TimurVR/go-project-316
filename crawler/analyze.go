@@ -182,12 +182,11 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		case <-ctx.Done():
 			activeTasks = 0
 		case page := <-resultChan:
-			if page.Depth == 0 {
+			if page.Depth <= opts.Depth {
 				if _, exists := pagesMap[page.URL]; !exists {
 					pagesMap[page.URL] = page
 				}
 			}
-
 			if page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
