@@ -55,9 +55,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
+	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
