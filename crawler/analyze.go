@@ -182,8 +182,10 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		case <-ctx.Done():
 			activeTasks = 0
 		case page := <-resultChan:
-			if _, exists := pagesMap[page.URL]; !exists {
-				pagesMap[page.URL] = page
+			if page.Depth <= opts.Depth {
+				if _, exists := pagesMap[page.URL]; !exists {
+					pagesMap[page.URL] = page
+				}
 			}
 			if page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
@@ -212,7 +214,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	close(taskChan)
 	workersWg.Wait()
-
 	for _, page := range pagesMap {
 		report.Pages = append(report.Pages, page)
 	}
