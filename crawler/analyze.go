@@ -1,4 +1,4 @@
-package code
+package crawler
 
 import (
 	"context"
@@ -761,4 +761,3 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 func IsHTMLContent(contentType string) bool {
 	return len(contentType) >= 9 && contentType[:9] == "text/html"
 }
-
