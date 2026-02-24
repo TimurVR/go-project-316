@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,9 +52,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -294,10 +293,6 @@ FINISH:
 		report.Pages = append(report.Pages, page)
 	}
 
-	sort.Slice(report.Pages, func(i, j int) bool {
-		return report.Pages[i].URL < report.Pages[j].URL
-	})
-
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
@@ -318,12 +313,14 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
+		Assets:       make([]Asset, 0),
+		BrokenLinks:  make([]BrokenLink, 0),
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL)
 	if err != nil {
 		page.Status = "error"
-		page.Error = err.Error()
+		page.Error = strings.TrimPrefix(err.Error(), "Get \""+pageURL+"\": ")
 		page.HTTPStatus = 0
 		return page, nil
 	}
@@ -342,7 +339,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		return page, nil
 	}
 
-	var assets []Asset
 	for _, assetURL := range assetURLs {
 		absAssetURL, err := NormalizeURL(assetURL, baseURL)
 		if err != nil {
@@ -358,7 +354,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		assetMu.RUnlock()
 
 		if exists && cached.err == nil {
-			assets = append(assets, cached.asset)
+			page.Assets = append(page.Assets, cached.asset)
 			continue
 		}
 
@@ -367,18 +363,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			assetMu.Lock()
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
 			assetMu.Unlock()
-			assets = append(assets, asset)
+			page.Assets = append(page.Assets, asset)
 		}
-	}
-	
-	if len(assets) > 0 {
-		sort.Slice(assets, func(i, j int) bool {
-			if assets[i].Type != assets[j].Type {
-				return assets[i].Type < assets[j].Type
-			}
-			return assets[i].URL < assets[j].URL
-		})
-		page.Assets = assets
 	}
 
 	rawLinks := extractLinks(html)
@@ -394,7 +380,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		}
 	}
 
-	var brokenLinks []BrokenLink
 	for _, link := range absoluteLinks {
 		linkURL, err := url.Parse(link)
 		if err != nil {
@@ -416,12 +401,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			} else {
 				brokenLink.Error = fmt.Sprintf("HTTP %d", statusCode)
 			}
-			brokenLinks = append(brokenLinks, brokenLink)
+			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
 		}
-	}
-	
-	if len(brokenLinks) > 0 {
-		page.BrokenLinks = brokenLinks
 	}
 
 	return page, nil
@@ -741,17 +722,17 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Get %q: %v", url, err)
+		return "", err
 	}
 	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("статус код: %d", resp.StatusCode)
+	}
 	
 	contentType := resp.Header.Get("Content-Type")
 	if !IsHTMLContent(contentType) {
 		return "", fmt.Errorf("не HTML контент: %s", contentType)
-	}
-	
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("статус код: %d", resp.StatusCode)
 	}
 	
 	body, err := io.ReadAll(resp.Body)
