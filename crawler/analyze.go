@@ -53,7 +53,7 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error,omitempty"`
+	Error        string       `json:"error"` 
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
 	Assets       []Asset      `json:"assets"`
@@ -352,7 +352,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		Assets:       make([]Asset, 0),     
+		Assets:       make([]Asset, 0),      
 		BrokenLinks:  make([]BrokenLink, 0), 
 	}
 
