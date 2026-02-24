@@ -14,7 +14,6 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 )
-
 type SEO struct {
 	HasTitle       bool   `json:"has_title"`
 	Title          string `json:"title"`
@@ -55,9 +54,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -186,7 +185,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			if _, exists := pagesMap[page.URL]; !exists {
 				pagesMap[page.URL] = page
 			}
-
 			if opts.Depth > 0 && page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
@@ -354,6 +352,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
+		Assets:       make([]Asset, 0),     
+		BrokenLinks:  make([]BrokenLink, 0), 
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -366,8 +366,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 	page.SEO = extractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	page.BrokenLinks = []BrokenLink{}
-	page.Assets = []Asset{}
 
 	baseURL, _ := url.Parse(pageURL)
 	rawAssets := ExtractAssetURLs(html)
