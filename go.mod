@@ -1,4 +1,4 @@
-module go-project-316
+module code
 
 go 1.23.3
 

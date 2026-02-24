@@ -3,7 +3,7 @@ package code_test
 import (
 	"context"
 	"encoding/json"
-	code "go-project-316/crawler"
+	code "code/crawler"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
