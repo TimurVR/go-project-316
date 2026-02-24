@@ -182,7 +182,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		case <-ctx.Done():
 			activeTasks = 0
 		case page := <-resultChan:
-			if page.Depth <= opts.Depth {
+			if page.Depth == 0 {
 				if _, exists := pagesMap[page.URL]; !exists {
 					pagesMap[page.URL] = page
 				}
