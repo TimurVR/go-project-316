@@ -150,7 +150,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
-
 	taskChan := make(chan CrawlTask, 2000)
 	resultChan := make(chan Page, 2000)
 
@@ -167,7 +166,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				if err := rateLimiter.Wait(ctx); err != nil {
 					return
 				}
-				page, _ := crawlPage(ctx, opts, task.URL, task.Depth, rootURL)
+				page, _ := crawlPage(ctx, opts, task.URL, task.Depth)
 				resultChan <- page
 			}
 		}()
@@ -175,7 +174,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited[rawRoot] = true
 	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
-
+	
 	pagesMap := make(map[string]Page)
 	activeTasks := 1
 
@@ -185,16 +184,14 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			activeTasks = 0
 		case page := <-resultChan:
 			pagesMap[page.URL] = page
-			if page.Depth < opts.Depth && page.Status == "ok" {
+			if opts.Depth > 0 && page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
-					links := extractLinks(html)
-					for _, link := range links {
+					for _, link := range extractLinks(html) {
 						baseURL, _ := url.Parse(page.URL)
-						absLink, err := NormalizeURL(link, baseURL)
-						if err != nil {
-							continue
-						}
+						absLink, _ := NormalizeURL(link, baseURL)
+						if absLink == "" { continue }
+						
 						linkURL, _ := url.Parse(absLink)
 						if IsSameDomain(linkURL, rootURL) {
 							visitedMu.Lock()
@@ -348,49 +345,61 @@ func ShouldCheckAsset(urlStr string) bool {
 	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
 }
 
-func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, rootURL *url.URL) (Page, error) {
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Page, error) {
 	page := Page{
 		URL:          pageURL,
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		Assets:       make([]Asset, 0),
-		BrokenLinks:  make([]BrokenLink, 0),
 	}
+
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
 	}
+
 	page.SEO = extractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	baseURL, _ := url.Parse(pageURL)
+	page.BrokenLinks = make([]BrokenLink, 0)
+	page.Assets = make([]Asset, 0)
 
-	assetURLs := ExtractAssetURLs(html)
-	for _, assetURL := range assetURLs {
-		abs, err := NormalizeURL(assetURL, baseURL)
-		if err != nil || !ShouldCheckAsset(abs) {
-			continue
+	baseURL, _ := url.Parse(pageURL)
+	rawAssets := ExtractAssetURLs(html)
+	if len(rawAssets) > 0 {
+		var assets []Asset
+		for _, assetURL := range rawAssets {
+			abs, err := NormalizeURL(assetURL, baseURL)
+			if err != nil || !ShouldCheckAsset(abs) { continue }
+			
+			assetMu.RLock()
+			cached, exists := assetCache[abs]
+			assetMu.RUnlock()
+			
+			if exists {
+				assets = append(assets, cached.asset)
+				continue
+			}
+
+			asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+			if err == nil {
+				assetMu.Lock()
+				assetCache[abs] = assetCacheItem{asset: asset}
+				assetMu.Unlock()
+				assets = append(assets, asset)
+			}
 		}
-		assetMu.RLock()
-		cached, exists := assetCache[abs]
-		assetMu.RUnlock()
-		if exists {
-			page.Assets = append(page.Assets, cached.asset)
-			continue
-		}
-		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
-		if err == nil {
-			assetMu.Lock()
-			assetCache[abs] = assetCacheItem{asset: asset}
-			assetMu.Unlock()
-			page.Assets = append(page.Assets, asset)
-		}
+		
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].Type != assets[j].Type {
+				return assets[i].Type < assets[j].Type
+			}
+			return assets[i].URL < assets[j].URL
+		})
+		page.Assets = assets
 	}
-	sort.Slice(page.Assets, func(i, j int) bool {
-		return page.Assets[i].URL < page.Assets[j].URL
-	})
+
 	return page, nil
 }
