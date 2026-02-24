@@ -15,6 +15,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
+
 type SEO struct {
 	HasTitle       bool   `json:"has_title"`
 	Title          string `json:"title"`
@@ -55,9 +56,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -184,7 +185,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			activeTasks = 0
 		case page := <-resultChan:
 			pagesMap[page.URL] = page
-			// Критическое исправление для TestAnalyzeJSONReportSingleDepth
 			if opts.Depth > 0 && page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
@@ -352,6 +352,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
+		Assets:       []Asset{},      // Явная инициализация для тестов
+		BrokenLinks:  []BrokenLink{}, // Явная инициализация для тестов
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -364,44 +366,40 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 	page.SEO = extractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	page.BrokenLinks = make([]BrokenLink, 0)
 
 	baseURL, _ := url.Parse(pageURL)
 	rawAssets := ExtractAssetURLs(html)
-	if len(rawAssets) > 0 {
-		var assets []Asset
-		for _, assetURL := range rawAssets {
-			abs, _ := NormalizeURL(assetURL, baseURL)
-			if !ShouldCheckAsset(abs) { continue }
-			
-			assetMu.RLock()
-			cached, exists := assetCache[abs]
-			assetMu.RUnlock()
-			
-			if exists {
-				assets = append(assets, cached.asset)
-				continue
-			}
-
-			asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
-			if err == nil {
-				assetMu.Lock()
-				assetCache[abs] = assetCacheItem{asset: asset}
-				assetMu.Unlock()
-				assets = append(assets, asset)
-			}
-		}
+	
+	var assets []Asset
+	for _, assetURL := range rawAssets {
+		abs, _ := NormalizeURL(assetURL, baseURL)
+		if !ShouldCheckAsset(abs) { continue }
 		
-		sort.Slice(assets, func(i, j int) bool {
-			if assets[i].Type != assets[j].Type {
-				return assets[i].Type < assets[j].Type
-			}
-			return assets[i].URL < assets[j].URL
-		})
-		page.Assets = assets
-	} else {
-		page.Assets = make([]Asset, 0)
+		assetMu.RLock()
+		cached, exists := assetCache[abs]
+		assetMu.RUnlock()
+		
+		if exists {
+			assets = append(assets, cached.asset)
+			continue
+		}
+
+		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		if err == nil {
+			assetMu.Lock()
+			assetCache[abs] = assetCacheItem{asset: asset}
+			assetMu.Unlock()
+			assets = append(assets, asset)
+		}
 	}
+	
+	sort.Slice(assets, func(i, j int) bool {
+		if assets[i].Type != assets[j].Type {
+			return assets[i].Type < assets[j].Type
+		}
+		return assets[i].URL < assets[j].URL
+	})
+	page.Assets = assets
 
 	return page, nil
 }
