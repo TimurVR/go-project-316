@@ -184,8 +184,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			activeTasks = 0
 		case page := <-resultChan:
 			pagesMap[page.URL] = page
-			// Проверка глубины: если Depth 0, в этот блок не заходим
-			if opts.Depth > 0 && page.Depth < opts.Depth && page.Status == "ok" {
+			if page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
 					for _, link := range extractLinks(html) {
@@ -352,8 +351,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		Assets:       make([]Asset, 0),      // Инициализация [] вместо null
-		BrokenLinks:  make([]BrokenLink, 0), // Инициализация [] вместо null
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -366,6 +363,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 	page.SEO = extractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
+	page.BrokenLinks = []BrokenLink{}
+	page.Assets = []Asset{}
 
 	baseURL, _ := url.Parse(pageURL)
 	rawAssets := ExtractAssetURLs(html)
