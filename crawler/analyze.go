@@ -292,7 +292,14 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 FINISH:
 	for _, page := range pagesMap {
+		if page.SEO == nil {
+			page.SEO = &SEO{}
+		}
 		report.Pages = append(report.Pages, page)
+	}
+
+	if report.Pages == nil {
+		report.Pages = make([]Page, 0)
 	}
 
 	var jsonData []byte
@@ -317,6 +324,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		BrokenLinks:  make([]BrokenLink, 0),
 		Assets:       make([]Asset, 0),
 		Error:        "",
+		SEO:          &SEO{},
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL)
@@ -328,7 +336,10 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	}
 
 	seoData := extractSEO(html)
-	page.SEO = seoData
+	if seoData != nil {
+		page.SEO = seoData
+	}
+	
 	page.Status = "ok"
 	page.HTTPStatus = 200
 
