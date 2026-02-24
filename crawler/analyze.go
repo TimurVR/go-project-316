@@ -15,7 +15,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-
 type SEO struct {
 	HasTitle       bool   `json:"has_title"`
 	Title          string `json:"title"`
@@ -185,6 +184,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			activeTasks = 0
 		case page := <-resultChan:
 			pagesMap[page.URL] = page
+			// Проверка глубины: если Depth 0, в этот блок не заходим
 			if opts.Depth > 0 && page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
@@ -352,8 +352,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		Assets:       []Asset{},      // Явная инициализация для тестов
-		BrokenLinks:  []BrokenLink{}, // Явная инициализация для тестов
+		Assets:       make([]Asset, 0),      // Инициализация [] вместо null
+		BrokenLinks:  make([]BrokenLink, 0), // Инициализация [] вместо null
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -399,7 +399,10 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		}
 		return assets[i].URL < assets[j].URL
 	})
-	page.Assets = assets
+	
+	if len(assets) > 0 {
+		page.Assets = assets
+	}
 
 	return page, nil
 }
