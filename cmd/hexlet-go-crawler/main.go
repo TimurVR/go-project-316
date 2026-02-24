@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	code "project/code/crawler"
+	code "go-project-316/code/crawler"
 	"time"
 
 	"github.com/urfave/cli/v3"

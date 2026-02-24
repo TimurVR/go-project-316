@@ -1,4 +1,4 @@
-module project
+module go-project-316
 
 go 1.23.3
 
