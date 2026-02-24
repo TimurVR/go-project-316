@@ -18,7 +18,6 @@ type SEO struct {
 	HasDescription bool   `json:"has_description"`
 	Description    string `json:"description"`
 	HasH1          bool   `json:"has_h1"`
-	H1             string `json:"h1"`
 }
 
 type Asset struct {
@@ -298,10 +297,6 @@ FINISH:
 		report.Pages = append(report.Pages, page)
 	}
 
-	if report.Pages == nil {
-		report.Pages = make([]Page, 0)
-	}
-
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
@@ -321,8 +316,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		URL:          pageURL,
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
-		BrokenLinks:  make([]BrokenLink, 0),
-		Assets:       make([]Asset, 0),
 		Error:        "",
 		SEO:          &SEO{},
 	}
@@ -334,6 +327,9 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		page.HTTPStatus = 0
 		return page, nil
 	}
+
+	page.BrokenLinks = make([]BrokenLink, 0)
+	page.Assets = make([]Asset, 0)
 
 	seoData := extractSEO(html)
 	if seoData != nil {
@@ -561,7 +557,6 @@ func extractSEO(htmlContent string) *SEO {
 		HasDescription: false,
 		Description:    "",
 		HasH1:          false,
-		H1:             "",
 	}
 
 	titleStart := strings.Index(htmlContent, "<title>")
@@ -599,17 +594,7 @@ func extractSEO(htmlContent string) *SEO {
 	if h1Start != -1 {
 		h1End := strings.Index(htmlContent[h1Start:], "</h1>")
 		if h1End != -1 {
-			h1Content := htmlContent[h1Start:]
-			gtPos := strings.Index(h1Content, ">")
-			if gtPos != -1 {
-				h1Content = h1Content[gtPos+1 : h1End]
-				h1Content = strings.TrimSpace(h1Content)
-				h1Content = DecodeHTMLEntities(h1Content)
-				if h1Content != "" {
-					seo.HasH1 = true
-					seo.H1 = h1Content
-				}
-			}
+			seo.HasH1 = true
 		}
 	}
 
@@ -753,7 +738,7 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Выполнение запроса: %w", err)
+		return "", fmt.Errorf("Get %q: %v", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
