@@ -81,7 +81,6 @@ type RateLimiter struct {
 
 type assetCacheItem struct {
 	asset Asset
-	err   error
 }
 
 var (
@@ -134,15 +133,12 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = 30 * time.Second
 	}
-	if opts.Concurrency == 0 {
+	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
 
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
-	rootURL, err := url.Parse(rawRoot)
-	if err != nil {
-		return nil, fmt.Errorf("Ошибка парсинга URL: %w", err)
-	}
+	rootURL, _ := url.Parse(rawRoot)
 
 	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
 	report := Report{
@@ -154,12 +150,11 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
-	taskChan := make(chan CrawlTask, 1000)
-	resultChan := make(chan Page, 1000)
+
+	taskChan := make(chan CrawlTask, 2000)
+	resultChan := make(chan Page, 2000)
 
 	var workersWg sync.WaitGroup
-	var taskWg sync.WaitGroup
-
 	assetMu.Lock()
 	assetCache = make(map[string]assetCacheItem)
 	assetMu.Unlock()
@@ -178,19 +173,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		}()
 	}
 
-	taskWg.Add(1)
-	go func() {
-		defer taskWg.Done()
-		visitedMu.Lock()
-		visited[rawRoot] = true
-		visitedMu.Unlock()
-		taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
-	}()
-
-	go func() {
-		taskWg.Wait()
-		close(taskChan)
-	}()
+	visited[rawRoot] = true
+	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
 
 	pagesMap := make(map[string]Page)
 	activeTasks := 1
@@ -204,7 +188,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			if page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 				if err == nil {
-					for _, link := range extractLinks(html) {
+					links := extractLinks(html)
+					for _, link := range links {
 						baseURL, _ := url.Parse(page.URL)
 						absLink, err := NormalizeURL(link, baseURL)
 						if err != nil {
@@ -216,11 +201,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 							if !visited[absLink] {
 								visited[absLink] = true
 								activeTasks++
-								taskWg.Add(1)
-								go func(u string, d int) {
-									defer taskWg.Done()
-									taskChan <- CrawlTask{URL: u, Depth: d}
-								}(absLink, page.Depth+1)
+								taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
 							}
 							visitedMu.Unlock()
 						}
@@ -231,6 +212,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		}
 	}
 
+	close(taskChan)
 	workersWg.Wait()
 
 	for _, page := range pagesMap {
@@ -260,8 +242,8 @@ func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client,
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return string(body), err
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), nil
 }
 
 func extractSEO(html string) *SEO {
@@ -395,7 +377,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		assetMu.RLock()
 		cached, exists := assetCache[abs]
 		assetMu.RUnlock()
-		if exists && cached.err == nil {
+		if exists {
 			page.Assets = append(page.Assets, cached.asset)
 			continue
 		}
@@ -407,10 +389,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			page.Assets = append(page.Assets, asset)
 		}
 	}
-
 	sort.Slice(page.Assets, func(i, j int) bool {
 		return page.Assets[i].URL < page.Assets[j].URL
 	})
-
 	return page, nil
 }
