@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,9 +53,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
+	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -240,13 +241,18 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			if !ok {
 				goto FINISH
 			}
-			pagesMap[page.URL] = page
+
+			normalizedURL := strings.TrimSuffix(page.URL, "/")
+			if normalizedURL == "" {
+				normalizedURL = page.URL
+			}
+			pagesMap[normalizedURL] = page
 
 			if page.Depth < opts.Depth && page.Status == "ok" {
 				html, err := GetHTMLWithContext(ctx, page.URL)
 				if err == nil {
 					rawLinks := extractLinks(html)
-					
+
 					for _, link := range rawLinks {
 						pageURL, _ := url.Parse(page.URL)
 						absLink, err := NormalizeURL(link, pageURL)
@@ -254,6 +260,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 							continue
 						}
 
+						absLink = strings.TrimSuffix(absLink, "/")
 						linkURL, err := url.Parse(absLink)
 						if err != nil {
 							continue
@@ -261,7 +268,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 						if IsSameDomain(linkURL, rootURL) {
 							visitedMu.Lock()
-							if !visited[absLink] {
+							if !visited[absLink] && !visited[absLink+"/"] {
 								visited[absLink] = true
 								activeTasks++
 								taskWg.Add(1)
@@ -293,6 +300,10 @@ FINISH:
 		report.Pages = append(report.Pages, page)
 	}
 
+	sort.Slice(report.Pages, func(i, j int) bool {
+		return report.Pages[i].URL < report.Pages[j].URL
+	})
+
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
@@ -313,8 +324,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		Assets:       make([]Asset, 0),
-		BrokenLinks:  make([]BrokenLink, 0),
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL)
@@ -329,7 +338,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 	if seoData != nil {
 		page.SEO = seoData
 	}
-	
+
 	page.Status = "ok"
 	page.HTTPStatus = 200
 
@@ -339,6 +348,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		return page, nil
 	}
 
+	var assets []Asset
 	for _, assetURL := range assetURLs {
 		absAssetURL, err := NormalizeURL(assetURL, baseURL)
 		if err != nil {
@@ -354,7 +364,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		assetMu.RUnlock()
 
 		if exists && cached.err == nil {
-			page.Assets = append(page.Assets, cached.asset)
+			assets = append(assets, cached.asset)
 			continue
 		}
 
@@ -363,8 +373,24 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			assetMu.Lock()
 			assetCache[absAssetURL] = assetCacheItem{asset: asset, err: nil}
 			assetMu.Unlock()
-			page.Assets = append(page.Assets, asset)
+			assets = append(assets, asset)
 		}
+	}
+
+	if len(assets) > 0 {
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].Type == "script" && assets[j].Type != "script" {
+				return true
+			}
+			if assets[j].Type == "script" && assets[i].Type != "script" {
+				return false
+			}
+			if assets[i].Type != assets[j].Type {
+				return assets[i].Type < assets[j].Type
+			}
+			return assets[i].URL < assets[j].URL
+		})
+		page.Assets = assets
 	}
 
 	rawLinks := extractLinks(html)
@@ -380,6 +406,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 		}
 	}
 
+	var brokenLinks []BrokenLink
 	for _, link := range absoluteLinks {
 		linkURL, err := url.Parse(link)
 		if err != nil {
@@ -401,8 +428,12 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, roo
 			} else {
 				brokenLink.Error = fmt.Sprintf("HTTP %d", statusCode)
 			}
-			page.BrokenLinks = append(page.BrokenLinks, brokenLink)
+			brokenLinks = append(brokenLinks, brokenLink)
 		}
+	}
+
+	if len(brokenLinks) > 0 {
+		page.BrokenLinks = brokenLinks
 	}
 
 	return page, nil
@@ -725,16 +756,16 @@ func GetHTMLWithContext(ctx context.Context, url string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("статус код: %d", resp.StatusCode)
 	}
-	
+
 	contentType := resp.Header.Get("Content-Type")
 	if !IsHTMLContent(contentType) {
 		return "", fmt.Errorf("не HTML контент: %s", contentType)
 	}
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("чтение тела: %w", err)
