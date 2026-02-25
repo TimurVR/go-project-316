@@ -55,9 +55,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links"`
+	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets"`
+	Assets       []Asset      `json:"assets,omitempty"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -359,8 +359,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		BrokenLinks:  make([]BrokenLink, 0),
-		Assets:       make([]Asset, 0),
 	}
 
 	html, finalURL, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -370,8 +368,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		return page, nil
 	}
 
-	page.URL = finalURL.String() 
-	page.HTTPStatus = 200        
+	page.URL = finalURL.String()
+	page.HTTPStatus = 200
 	page.Status = "ok"
 	page.SEO = extractSEO(html)
 
@@ -425,14 +423,13 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		}
 	}
 
-	sort.Slice(assets, func(i, j int) bool {
-		if assets[i].Type != assets[j].Type {
-			return assets[i].Type < assets[j].Type
-		}
-		return assets[i].URL < assets[j].URL
-	})
-
 	if len(assets) > 0 {
+		sort.Slice(assets, func(i, j int) bool {
+			if assets[i].Type != assets[j].Type {
+				return assets[i].Type < assets[j].Type
+			}
+			return assets[i].URL < assets[j].URL
+		})
 		page.Assets = assets
 	}
 
