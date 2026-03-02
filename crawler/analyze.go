@@ -150,11 +150,13 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
+	pagesMu := sync.Mutex{}
+	pagesMap := make(map[string]Page)
 
 	taskChan := make(chan CrawlTask, 10000)
-	resultChan := make(chan Page, 10000)
-
+	var activeTasks sync.WaitGroup
 	var workersWg sync.WaitGroup
+
 	assetMu.Lock()
 	assetCache = make(map[string]assetCacheItem)
 	assetMu.Unlock()
@@ -165,38 +167,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			defer workersWg.Done()
 			for task := range taskChan {
 				if err := rateLimiter.Wait(ctx); err != nil {
-					return
-				}				
+					activeTasks.Done()
+					continue
+				}
+
 				page, _ := crawlPage(ctx, opts, task.URL, task.Depth)
-				resultChan <- page
-			}
-		}()
-	}
 
-	visited[rawRoot] = true
-	activeTasks := 1
-	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
+				pagesMu.Lock()
+				pagesMap[page.URL] = page
+				pagesMu.Unlock()
 
-	pagesMap := make(map[string]Page)
-
-Loop:
-	for activeTasks > 0 {
-		select {
-		case <-ctx.Done():
-			break Loop
-		case page := <-resultChan:
-			func() {
-				defer func() { activeTasks-- }() 
-
-				if page.URL == "" {
-					return
-				}
-				if page.Depth <= opts.Depth {
-					if _, exists := pagesMap[page.URL]; !exists {
-						pagesMap[page.URL] = page
-					}
-				}
-				if page.Depth < opts.Depth && page.Status == "ok" {
+				if task.Depth < opts.Depth && page.Status == "ok" {
 					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 					if err == nil {
 						baseURL, _ := url.Parse(page.URL)
@@ -211,19 +192,33 @@ Loop:
 								visitedMu.Lock()
 								if !visited[absLink] {
 									visited[absLink] = true
-									activeTasks++
-									taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
+									activeTasks.Add(1)
+									select {
+									case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
+									case <-ctx.Done():
+									}
 								}
 								visitedMu.Unlock()
 							}
 						}
 					}
 				}
-			}()
-		}
+				activeTasks.Done()
+			}
+		}()
 	}
-	close(taskChan)
+
+	visited[rawRoot] = true
+	activeTasks.Add(1)
+	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
+
+	go func() {
+		activeTasks.Wait()
+		close(taskChan)
+	}()
+
 	workersWg.Wait()
+
 	for _, page := range pagesMap {
 		report.Pages = append(report.Pages, page)
 	}
