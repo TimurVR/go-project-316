@@ -166,6 +166,12 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		go func() {
 			defer workersWg.Done()
 			for task := range taskChan {
+				// Жесткая проверка: не обрабатываем, если глубина превышена
+				if task.Depth > opts.Depth {
+					activeTasks.Done()
+					continue
+				}
+
 				if err := rateLimiter.Wait(ctx); err != nil {
 					activeTasks.Done()
 					continue
@@ -174,9 +180,13 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				page, _ := crawlPage(ctx, opts, task.URL, task.Depth)
 
 				pagesMu.Lock()
-				pagesMap[page.URL] = page
+				// Сохраняем только если страница в рамках лимита
+				if task.Depth <= opts.Depth {
+					pagesMap[page.URL] = page
+				}
 				pagesMu.Unlock()
 
+				// Ищем новые ссылки ТОЛЬКО если мы СТРОГО меньше целевой глубины
 				if task.Depth < opts.Depth && page.Status == "ok" {
 					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 					if err == nil {
@@ -193,9 +203,11 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 								if !visited[absLink] {
 									visited[absLink] = true
 									activeTasks.Add(1)
+									// Отправляем задачу, только если контекст не закрыт
 									select {
 									case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
-									case <-ctx.Done():
+									default:
+										activeTasks.Done()
 									}
 								}
 								visitedMu.Unlock()
