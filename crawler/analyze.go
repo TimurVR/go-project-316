@@ -147,9 +147,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		GeneratedAt: time.Now().UTC(),
 		Pages:       make([]Page, 0),
 	}
-	if opts.Depth == 1 {
-		return json.Marshal(report)
-	}
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
 	taskChan := make(chan CrawlTask, 2000)
