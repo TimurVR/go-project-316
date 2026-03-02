@@ -55,9 +55,9 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error,omitempty"`
-	BrokenLinks  []BrokenLink `json:"broken_links,omitempty"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
 	SEO          *SEO         `json:"seo"`
-	Assets       []Asset      `json:"assets,omitempty"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
@@ -147,6 +147,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		GeneratedAt: time.Now().UTC(),
 		Pages:       make([]Page, 0),
 	}
+
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
 	taskChan := make(chan CrawlTask, 2000)
@@ -182,37 +183,40 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		case <-ctx.Done():
 			activeTasks = 0
 		case page := <-resultChan:
-			if page.Depth <= opts.Depth {
-				if _, exists := pagesMap[page.URL]; !exists {
-					pagesMap[page.URL] = page
+			if page.Depth == 0 {
+				if page.Depth <= opts.Depth {
+					if _, exists := pagesMap[page.URL]; !exists {
+						pagesMap[page.URL] = page
+					}
 				}
-			}
-			if page.Depth < opts.Depth && page.Status == "ok" {
-				html, finalURL, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
-				if err == nil {
-					for _, link := range extractLinks(html) {
-						absLink, _ := NormalizeURL(link, finalURL)
-						if absLink == "" {
-							continue
-						}
 
-						linkURL, _ := url.Parse(absLink)
-						if IsSameDomain(linkURL, rootURL) {
-							visitedMu.Lock()
-							if !visited[absLink] {
-								visited[absLink] = true
-								activeTasks++
-								taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
+				if page.Depth < opts.Depth && page.Status == "ok" {
+					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
+					if err == nil {
+						for _, link := range extractLinks(html) {
+							baseURL, _ := url.Parse(page.URL)
+							absLink, _ := NormalizeURL(link, baseURL)
+							if absLink == "" {
+								continue
 							}
-							visitedMu.Unlock()
+
+							linkURL, _ := url.Parse(absLink)
+							if IsSameDomain(linkURL, rootURL) {
+								visitedMu.Lock()
+								if !visited[absLink] {
+									visited[absLink] = true
+									activeTasks++
+									taskChan <- CrawlTask{URL: absLink, Depth: page.Depth + 1}
+								}
+								visitedMu.Unlock()
+							}
 						}
 					}
 				}
+				activeTasks--
 			}
-			activeTasks--
 		}
 	}
-
 	close(taskChan)
 	workersWg.Wait()
 	for _, page := range pagesMap {
@@ -227,27 +231,24 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return json.MarshalIndent(report, "", "  ")
 	}
 	return json.Marshal(report)
+
 }
 
-func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, *url.URL, error) {
+func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", nil, err
-	}
-	finalURL := resp.Request.URL
-	return string(body), finalURL, nil
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), nil
 }
 
 func extractSEO(html string) *SEO {
@@ -360,52 +361,31 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		SEO:          &SEO{},
 	}
 
-	html, finalURL, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
+	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
 	}
 
-	page.URL = finalURL.String()
-	page.HTTPStatus = 200
-	page.Status = "ok"
 	page.SEO = extractSEO(html)
+	page.Status = "ok"
+	page.HTTPStatus = 200
+	page.BrokenLinks = make([]BrokenLink, 0)
+	page.Assets = make([]Asset, 0)
 
-	rawLinks := extractLinks(html)
-	var brokenLinks []BrokenLink
-
-	for _, link := range rawLinks {
-		absLink, _ := NormalizeURL(link, finalURL)
-		if absLink == "" || !ShouldCheckAsset(absLink) {
-			continue
-		}
-
-		statusCode, err := checkLink(ctx, opts, absLink)
-		if err != nil || statusCode >= 400 {
-			brokenLinks = append(brokenLinks, BrokenLink{
-				URL:        absLink,
-				StatusCode: statusCode,
-				Error:      errToString(err),
-			})
-		}
-	}
-
-	if len(brokenLinks) > 0 {
-		page.BrokenLinks = brokenLinks
-	}
-
+	baseURL, _ := url.Parse(pageURL)
 	rawAssets := ExtractAssetURLs(html)
-	var assets []Asset
 
+	var assets []Asset
 	for _, assetURL := range rawAssets {
-		absAsset, _ := NormalizeURL(assetURL, finalURL)
-		if !ShouldCheckAsset(absAsset) {
+		abs, _ := NormalizeURL(assetURL, baseURL)
+		if !ShouldCheckAsset(abs) {
 			continue
 		}
 
 		assetMu.RLock()
-		cached, exists := assetCache[absAsset]
+		cached, exists := assetCache[abs]
 		assetMu.RUnlock()
 
 		if exists {
@@ -413,47 +393,25 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 			continue
 		}
 
-		asset, err := FetchAsset(ctx, opts.HTTPClient, absAsset, opts.UserAgent)
+		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
 		if err == nil {
 			assetMu.Lock()
-			assetCache[absAsset] = assetCacheItem{asset: asset}
+			assetCache[abs] = assetCacheItem{asset: asset}
 			assetMu.Unlock()
 			assets = append(assets, asset)
 		}
 	}
 
+	sort.Slice(assets, func(i, j int) bool {
+		if assets[i].Type != assets[j].Type {
+			return assets[i].Type < assets[j].Type
+		}
+		return assets[i].URL < assets[j].URL
+	})
+
 	if len(assets) > 0 {
-		sort.Slice(assets, func(i, j int) bool {
-			if assets[i].Type != assets[j].Type {
-				return assets[i].Type < assets[j].Type
-			}
-			return assets[i].URL < assets[j].URL
-		})
 		page.Assets = assets
 	}
 
 	return page, nil
-}
-
-func checkLink(ctx context.Context, opts Options, linkURL string) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, "HEAD", linkURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-	resp, err := opts.HTTPClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode, nil
-}
-
-func errToString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
