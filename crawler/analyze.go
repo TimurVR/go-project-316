@@ -145,7 +145,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		RootURL:     rawRoot,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().UTC(),
-		Pages:       make([]Page, 0),
+		Pages:       []Page{}, 
 	}
 
 	visited := make(map[string]bool)
@@ -181,8 +181,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				pagesMap[page.URL] = page
 				pagesMu.Unlock()
 				if task.Depth < opts.Depth && page.Status == "ok" {
+					baseURL, _ := url.Parse(page.URL)
 					for _, link := range foundLinks {
-						baseURL, _ := url.Parse(page.URL)
 						absLink, _ := NormalizeURL(link, baseURL)
 						if absLink == "" {
 							continue
@@ -355,8 +355,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		BrokenLinks:  []BrokenLink{},
-		Assets:       []Asset{},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
@@ -385,72 +383,30 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 	page.Status = "ok"
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
-
 	page.SEO = extractSEO(html)
 	baseURL, _ := url.Parse(pageURL)
 	rawAssets := ExtractAssetURLs(html)
-	for _, aURL := range rawAssets {
-		abs, _ := NormalizeURL(aURL, baseURL)
-		if !ShouldCheckAsset(abs) {
-			continue
-		}
-		
-		assetMu.RLock()
-		cached, exists := assetCache[abs]
-		assetMu.RUnlock()
-
-		if exists {
-			page.Assets = append(page.Assets, cached.asset)
-		} else {
+	if len(rawAssets) > 0 {
+		var assets []Asset
+		for _, aURL := range rawAssets {
+			abs, _ := NormalizeURL(aURL, baseURL)
+			if !ShouldCheckAsset(abs) {
+				continue
+			}
 			asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
 			if err == nil {
-				assetMu.Lock()
-				assetCache[abs] = assetCacheItem{asset: asset}
-				assetMu.Unlock()
-				page.Assets = append(page.Assets, asset)
+				assets = append(assets, asset)
 			}
 		}
-	}
-
-	links := extractLinks(html)
-	for _, link := range links {
-		abs, _ := NormalizeURL(link, baseURL)
-		if !ShouldCheckAsset(abs) {
-			continue
-		}
-
-		headReq, _ := http.NewRequestWithContext(ctx, "HEAD", abs, nil)
-		if opts.UserAgent != "" {
-			headReq.Header.Set("User-Agent", opts.UserAgent)
-		}
-		
-		hResp, hErr := opts.HTTPClient.Do(headReq)
-		if hErr != nil || hResp.StatusCode >= 400 {
-			code := 0
-			errMsg := "request failed"
-			if hErr != nil {
-				errMsg = hErr.Error()
-			} else {
-				code = hResp.StatusCode
-				errMsg = http.StatusText(code)
-				hResp.Body.Close()
-			}
-			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
-				URL:        abs,
-				StatusCode: code,
-				Error:      errMsg,
+		if len(assets) > 0 {
+			sort.Slice(assets, func(i, j int) bool {
+				if assets[i].Type != assets[j].Type {
+					return assets[i].Type < assets[j].Type
+				}
+				return assets[i].URL < assets[j].URL
 			})
-		} else {
-			hResp.Body.Close()
+			page.Assets = assets
 		}
 	}
-
-	sort.Slice(page.Assets, func(i, j int) bool {
-		if page.Assets[i].Type != page.Assets[j].Type {
-			return page.Assets[i].Type < page.Assets[j].Type
-		}
-		return page.Assets[i].URL < page.Assets[j].URL
-	})
-
-	return page, links
+	return page, extractLinks(html)
 }
