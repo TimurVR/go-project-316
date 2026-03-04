@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-    
+
 	"github.com/PuerkitoBio/goquery"
 )
 
@@ -30,7 +30,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	app := &crawlerApp{
 		opts:    opts,
-		results: make([]PageReport, 0),
+		results: []PageReport{},
 	}
 
 	if opts.RPS > 0 {
@@ -53,17 +53,24 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	return json.Marshal(report)
 }
 
+func normalizeURL(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	if len(parsed.Path) > 1 && strings.HasSuffix(parsed.Path, "/") {
+		parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	}
+	parsed.Fragment = "" 
+	return parsed.String()
+}
+
 func (c *crawlerApp) crawl(ctx context.Context, target string, depth int) {
 	if depth > c.opts.Depth {
 		return
 	}
 
-	parsed, err := url.Parse(target)
-	if err != nil {
-		return
-	}
-	canon := parsed.String()
-
+	canon := normalizeURL(target)
 	if _, loaded := c.visited.LoadOrStore(canon, true); loaded {
 		return
 	}
@@ -81,8 +88,8 @@ func (c *crawlerApp) crawl(ctx context.Context, target string, depth int) {
 		Depth:        depth,
 		Status:       "ok",
 		DiscoveredAt: time.Now().UTC(),
-		BrokenLinks:  make([]BrokenLink, 0),
-		Assets:       make([]Asset, 0),
+		BrokenLinks:  []BrokenLink{},
+		Assets:       []Asset{},
 	}
 
 	resp, err := c.doRequest(ctx, canon)
@@ -98,7 +105,8 @@ func (c *crawlerApp) crawl(ctx context.Context, target string, depth int) {
 	doc, _ := goquery.NewDocumentFromReader(resp.Body)
 	page.SEO = extractSEO(doc)
 
-	internalLinks := c.processElements(ctx, doc, parsed, &page)
+	parsedBase, _ := url.Parse(canon)
+	internalLinks := c.processElements(ctx, doc, parsedBase, &page)
 	c.addResult(page)
 
 	for _, link := range internalLinks {
@@ -163,17 +171,11 @@ func (c *crawlerApp) processElements(ctx context.Context, doc *goquery.Document,
 	var internal []string
 	doc.Find("img, script, link[rel='stylesheet']").Each(func(_ int, s *goquery.Selection) {
 		attr, aType := "src", "image"
-		if s.Is("link") {
-			attr, aType = "href", "style"
-		}
-		if s.Is("script") {
-			aType = "script"
-		}
-
+		if s.Is("link") { attr, aType = "href", "style" }
+		if s.Is("script") { aType = "script" }
+		
 		val, _ := s.Attr(attr)
-		if val == "" {
-			return
-		}
+		if val == "" { return }
 		abs := resolve(base, val)
 		page.Assets = append(page.Assets, c.checkAsset(ctx, abs, aType))
 	})
@@ -195,7 +197,6 @@ func (c *crawlerApp) processElements(ctx context.Context, doc *goquery.Document,
 	})
 	return internal
 }
-
 func resolve(base *url.URL, ref string) string {
 	u, err := url.Parse(ref)
 	if err != nil {
