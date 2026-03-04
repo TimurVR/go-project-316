@@ -333,16 +333,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	results := make(chan Page, 100)
 
 	var wg sync.WaitGroup
+	var resultsWg sync.WaitGroup
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
 	for i := 0; i < opts.Concurrency; i++ {
 		wg.Add(1)
 		go worker(workerCtx, opts, rootURL, limiter, assetCache, tasks, results, &wg)
 	}
-
+	resultsWg.Add(1)
 	go func() {
+		defer resultsWg.Done()
 		for page := range results {
 			visitedMutex.Lock()
 			if !visited[page.URL] {
@@ -352,31 +353,32 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 			visitedMutex.Unlock()
 		}
 	}()
-
-	go func() {
-		wg.Wait()
-		close(tasks)
-		close(results)
-	}()
 	select {
 	case tasks <- crawlTask{url: opts.URL, depth: 0}:
 	case <-ctx.Done():
 		cancel()
 		return nil, ctx.Err()
 	}
-	done := make(chan struct{})
 	go func() {
 		wg.Wait()
+		close(tasks)
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	done := make(chan struct{})
+	go func() {
+		resultsWg.Wait()
 		close(done)
 	}()
 
 	select {
-	case <-done:
 	case <-ctx.Done():
 		cancel()
 		return nil, ctx.Err()
+	case <-done:
 	}
-	time.Sleep(100 * time.Millisecond)
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
