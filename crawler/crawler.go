@@ -15,8 +15,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-
-
 var (
 	assetCache = make(map[string]assetCacheItem)
 	assetMu    sync.RWMutex
@@ -70,6 +68,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
+	opts.Depth -= 1
 
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
