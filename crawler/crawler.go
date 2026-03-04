@@ -68,9 +68,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
-	if opts.Depth == -1 {
-		return nil, nil
-	}
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
 
@@ -114,9 +111,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 				pagesMu.Lock()
 				pagesMap[page.URL] = page
-				if task.Depth <= opts.Depth {
-					pagesMap[page.URL] = page
-				}
 				pagesMu.Unlock()
 
 				if task.Depth < opts.Depth && page.Status == "ok" {
@@ -134,12 +128,15 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 								visitedMu.Lock()
 								if !visited[absLink] {
 									visited[absLink] = true
-									activeTasks.Add(1)
-									select {
-									case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
-									case <-ctx.Done():
-									default:
-										activeTasks.Done()
+									if task.Depth+1 < opts.Depth {
+										activeTasks.Add(1)
+										select {
+										case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
+										case <-ctx.Done():
+											activeTasks.Done()
+										default:
+											activeTasks.Done()
+										}
 									}
 								}
 								visitedMu.Unlock()
