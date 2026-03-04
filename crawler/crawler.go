@@ -68,8 +68,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
-	if opts.Depth < 0 {
-		opts.Depth = 0
+	if opts.Depth == -1 {
+		return nil, nil
 	}
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
