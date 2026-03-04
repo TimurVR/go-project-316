@@ -7,734 +7,354 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"golang.org/x/net/html"
-	"golang.org/x/time/rate"
 )
 
-func newAssetCache() *assetCache {
-	return &assetCache{
-		assets: make(map[string]*Asset),
+
+
+var (
+	assetCache = make(map[string]assetCacheItem)
+	assetMu    sync.RWMutex
+)
+
+func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
+	var minInterval time.Duration
+	if rps > 0 {
+		minInterval = time.Duration(float64(time.Second) / rps)
+	} else if delay > 0 {
+		minInterval = delay
+	} else {
+		return nil
+	}
+	return &RateLimiter{
+		minInterval: minInterval,
+		lastRequest: time.Now().Add(-minInterval),
 	}
 }
 
-func (ac *assetCache) get(url string) (*Asset, bool) {
-	ac.mu.RLock()
-	defer ac.mu.RUnlock()
-	asset, ok := ac.assets[url]
-	return asset, ok
-}
-
-func (ac *assetCache) set(url string, asset *Asset) {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	ac.assets[url] = asset
-}
-
-type task struct {
-	url   string
-	depth int
-}
-
-type rateLimiter struct {
-	limiter  *rate.Limiter
-	delay    time.Duration
-	useDelay bool
-	mu       sync.Mutex
-	lastTime time.Time
-}
-
-func newRateLimiter(opts Options) *rateLimiter {
-	rl := &rateLimiter{
-		useDelay: opts.RPS == 0 && opts.Delay > 0,
-		lastTime: time.Now(),
+func (rl *RateLimiter) Wait(ctx context.Context) error {
+	if rl == nil {
+		return nil
 	}
-
-	if opts.RPS > 0 {
-		rl.limiter = rate.NewLimiter(rate.Limit(opts.RPS), 1)
-	} else if opts.Delay > 0 {
-		rl.delay = opts.Delay
-	}
-
-	return rl
-}
-
-func (rl *rateLimiter) Wait(ctx context.Context) error {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-
-	if rl.limiter != nil {
-		return rl.limiter.Wait(ctx)
-	}
-
-	if rl.useDelay {
-		now := time.Now()
-		elapsed := now.Sub(rl.lastTime)
-		if elapsed < rl.delay {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(rl.delay - elapsed):
-			}
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRequest)
+	if elapsed < rl.minInterval {
+		waitTime := rl.minInterval - elapsed
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitTime):
 		}
-		rl.lastTime = time.Now()
 	}
-
+	rl.lastRequest = time.Now()
 	return nil
 }
 
-func shouldRetry(err error, statusCode int) bool {
-	if err != nil {
-		return true
-	}
-
-	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusInternalServerError,
-		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-func doRequestWithRetry(ctx context.Context, opts Options, req *http.Request) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-
-	for attempt := 0; attempt <= opts.Retries; attempt++ {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		resp, err = opts.HTTPClient.Do(req)
-
-		if err == nil {
-			if !shouldRetry(err, resp.StatusCode) {
-				return resp, nil
-			}
-			resp.Body.Close()
-		}
-
-		if attempt == opts.Retries {
-			if err != nil {
-				return nil, fmt.Errorf("request failed after %d retries: %w", opts.Retries, err)
-			}
-			return nil, fmt.Errorf("request failed after %d retries with status %d", opts.Retries, resp.StatusCode)
-		}
-
-		waitDuration := opts.Delay
-		if waitDuration == 0 {
-			waitDuration = time.Duration(100*(1<<attempt)) * time.Millisecond
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(waitDuration):
-		}
-	}
-
-	return nil, fmt.Errorf("unexpected error in retry logic")
-}
-
-func getAssetType(url string, element string, attrs map[string]string) string {
-	lowerURL := strings.ToLower(url)
-
-	if strings.Contains(lowerURL, ".jpg") || strings.Contains(lowerURL, ".jpeg") ||
-		strings.Contains(lowerURL, ".png") || strings.Contains(lowerURL, ".gif") ||
-		strings.Contains(lowerURL, ".svg") || strings.Contains(lowerURL, ".webp") ||
-		strings.Contains(lowerURL, ".ico") {
-		return "image"
-	}
-
-	if strings.Contains(lowerURL, ".js") {
-		return "script"
-	}
-
-	if strings.Contains(lowerURL, ".css") {
-		return "style"
-	}
-
-	switch element {
-	case "img":
-		return "image"
-	case "script":
-		return "script"
-	case "link":
-		if rel, ok := attrs["rel"]; ok && rel == "stylesheet" {
-			return "style"
-		}
-	}
-
-	return "other"
-}
-
-func fetchAsset(ctx context.Context, opts Options, assetURL string, assetType string, cache *assetCache) *Asset {
-	if cached, ok := cache.get(assetURL); ok {
-		return cached
-	}
-
-	asset := &Asset{
-		URL:        assetURL,
-		Type:       assetType,
-		StatusCode: 0,
-		SizeBytes:  0,
-		Error:      "",
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
-	if err != nil {
-		asset.Error = fmt.Sprintf("failed to create request: %v", err)
-		cache.set(assetURL, asset)
-		return asset
-	}
-
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-
-	resp, err := doRequestWithRetry(ctx, opts, req)
-	if err != nil {
-		asset.Error = err.Error()
-		cache.set(assetURL, asset)
-		return asset
-	}
-	defer resp.Body.Close()
-
-	asset.StatusCode = resp.StatusCode
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		if resp.ContentLength > 0 {
-			asset.SizeBytes = resp.ContentLength
-		} else {
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				asset.Error = fmt.Sprintf("failed to read body: %v", err)
-			} else {
-				asset.SizeBytes = int64(len(body))
-			}
-		}
-	} else {
-		asset.Error = fmt.Sprintf("HTTP status: %d", resp.StatusCode)
-	}
-
-	cache.set(assetURL, asset)
-	return asset
-}
-
-func extractAssets(ctx context.Context, opts Options, doc *goquery.Document, baseURL string, cache *assetCache) []Asset {
-	assets := make([]Asset, 0)
-	seen := make(map[string]bool)
-
-	doc.Find("img").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if !exists || src == "" {
-			return
-		}
-
-		absURL := resolveURL(src, baseURL)
-		if absURL == "" || seen[absURL] {
-			return
-		}
-		seen[absURL] = true
-
-		asset := fetchAsset(ctx, opts, absURL, "image", cache)
-		assets = append(assets, *asset)
-	})
-
-	doc.Find("script").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if !exists || src == "" {
-			return
-		}
-
-		absURL := resolveURL(src, baseURL)
-		if absURL == "" || seen[absURL] {
-			return
-		}
-		seen[absURL] = true
-
-		asset := fetchAsset(ctx, opts, absURL, "script", cache)
-		assets = append(assets, *asset)
-	})
-
-	doc.Find("link[rel='stylesheet']").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if !exists || href == "" {
-			return
-		}
-
-		absURL := resolveURL(href, baseURL)
-		if absURL == "" || seen[absURL] {
-			return
-		}
-		seen[absURL] = true
-
-		asset := fetchAsset(ctx, opts, absURL, "style", cache)
-		assets = append(assets, *asset)
-	})
-
-	return assets
-}
-
-func resolveURL(ref, base string) string {
-	baseURL, err := url.Parse(base)
-	if err != nil {
-		return ""
-	}
-
-	refURL, err := url.Parse(ref)
-	if err != nil {
-		return ""
-	}
-
-	absURL := baseURL.ResolveReference(refURL)
-
-	if absURL.Scheme != "http" && absURL.Scheme != "https" {
-		return ""
-	}
-
-	absURL.Fragment = ""
-	return absURL.String()
-}
-
 func Analyze(ctx context.Context, opts Options) ([]byte, error) {
+	if opts.URL == "" {
+		return nil, fmt.Errorf("URL обязателен")
+	}
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = &http.Client{
-			Timeout: opts.Timeout,
-		}
+		opts.HTTPClient = &http.Client{Timeout: opts.Timeout}
+	}
+	if opts.Timeout == 0 {
+		opts.Timeout = 30 * time.Second
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 1
 	}
 
-	rootURL, err := url.Parse(opts.URL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid root URL: %w", err)
-	}
+	rawRoot, _ := NormalizeURL(opts.URL, nil)
+	rootURL, _ := url.Parse(rawRoot)
 
-	limiter := newRateLimiter(opts)
-	assetCache := newAssetCache()
-
+	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
 	report := Report{
-		RootURL:     opts.URL,
+		RootURL:     rawRoot,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().UTC(),
 		Pages:       make([]Page, 0),
 	}
 
 	visited := make(map[string]bool)
-	visitedMutex := &sync.RWMutex{}
+	visitedMu := sync.Mutex{}
+	pagesMu := sync.Mutex{}
+	pagesMap := make(map[string]Page)
 
-	tasks := make(chan crawlTask, 100)
-	results := make(chan Page, 100)
+	taskChan := make(chan CrawlTask, 10000)
+	var activeTasks sync.WaitGroup
+	var workersWg sync.WaitGroup
 
-	var wg sync.WaitGroup
-	var resultsWg sync.WaitGroup
+	assetMu.Lock()
+	assetCache = make(map[string]assetCacheItem)
+	assetMu.Unlock()
 
-	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	for i := 0; i < opts.Concurrency; i++ {
-		wg.Add(1)
-		go worker(workerCtx, opts, rootURL, limiter, assetCache, tasks, results, &wg)
-	}
-	resultsWg.Add(1)
-	go func() {
-		defer resultsWg.Done()
-		for page := range results {
-			visitedMutex.Lock()
-			if !visited[page.URL] {
-				visited[page.URL] = true
-				report.Pages = append(report.Pages, page)
-			}
-			visitedMutex.Unlock()
-		}
-	}()
-	select {
-	case tasks <- crawlTask{url: opts.URL, depth: 0}:
-	case <-ctx.Done():
-		cancel()
-		return nil, ctx.Err()
-	}
-	go func() {
-		wg.Wait()
-		close(tasks)
-	}()
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-	done := make(chan struct{})
-	go func() {
-		resultsWg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		cancel()
-		return nil, ctx.Err()
-	case <-done:
-	}
-	var jsonData []byte
-	if opts.IndentJSON {
-		jsonData, err = json.MarshalIndent(report, "", "  ")
-	} else {
-		jsonData, err = json.Marshal(report)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal report: %w", err)
-	}
-
-	return jsonData, nil
-}
-
-func worker(ctx context.Context, opts Options, rootURL *url.URL, limiter *rateLimiter,
-	assetCache *assetCache, tasks chan crawlTask, results chan<- Page, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case t, ok := <-tasks:
-			if !ok {
-				return
-			}
-
-			if t.depth > opts.Depth {
-				continue
-			}
-
-			pageURL, err := url.Parse(t.url)
-			if err != nil {
-				continue
-			}
-
-			if pageURL.Host != rootURL.Host {
-				continue
-			}
-
-			if err := limiter.Wait(ctx); err != nil {
-				if err == context.Canceled {
-					return
-				}
-				continue
-			}
-
-			page, err := fetchPage(ctx, opts, t.url, t.depth, assetCache)
-			if err != nil {
-				page = Page{
-					URL:          t.url,
-					Depth:        t.depth,
-					HTTPStatus:   0,
-					Status:       "error",
-					Error:        err.Error(),
-					BrokenLinks:  []BrokenLink{},
-					Assets:       []Asset{},
-					SEO:          SEO{HasTitle: false, Title: "", HasDescription: false, Description: "", HasH1: false, H1: ""},
-					DiscoveredAt: time.Now().UTC(),
-				}
-			}
-
-			select {
-			case results <- page:
-			case <-ctx.Done():
-				return
-			}
-			if t.depth < opts.Depth && page.Status == "ok" {
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.url, nil)
-				if err != nil {
+		workersWg.Add(1)
+		go func() {
+			defer workersWg.Done()
+			for task := range taskChan {
+				if task.Depth > opts.Depth {
+					activeTasks.Done()
 					continue
 				}
 
-				if opts.UserAgent != "" {
-					req.Header.Set("User-Agent", opts.UserAgent)
-				}
-
-				resp, err := doRequestWithRetry(ctx, opts, req)
-				if err != nil {
+				if err := rateLimiter.Wait(ctx); err != nil {
+					activeTasks.Done()
 					continue
 				}
 
-				body, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					continue
-				}
-				links, err := extractLinksFromHTML(body, t.url)
-				if err != nil {
-					continue
-				}
-				for _, link := range links {
-					linkURL, err := url.Parse(link)
-					if err != nil {
-						continue
-					}
+				page, _ := crawlPage(ctx, opts, task.URL, task.Depth)
 
-					if linkURL.Host == rootURL.Host {
-						linkURL.Fragment = ""
-						normalizedLink := linkURL.String()
+				pagesMu.Lock()
+				pagesMap[page.URL] = page
+				if task.Depth <= opts.Depth {
+					pagesMap[page.URL] = page
+				}
+				pagesMu.Unlock()
 
-						if t.depth+1 <= opts.Depth {
-							select {
-							case tasks <- crawlTask{url: normalizedLink, depth: t.depth + 1}:
-							case <-ctx.Done():
-								return
+				if task.Depth < opts.Depth && page.Status == "ok" {
+					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
+					if err == nil {
+						baseURL, _ := url.Parse(page.URL)
+						for _, link := range extractLinks(html) {
+							absLink, _ := NormalizeURL(link, baseURL)
+							if absLink == "" {
+								continue
+							}
+
+							linkURL, _ := url.Parse(absLink)
+							if IsSameDomain(linkURL, rootURL) {
+								visitedMu.Lock()
+								if !visited[absLink] {
+									visited[absLink] = true
+									activeTasks.Add(1)
+									select {
+									case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
+									case <-ctx.Done():
+									default:
+										activeTasks.Done()
+									}
+								}
+								visitedMu.Unlock()
 							}
 						}
 					}
 				}
+				activeTasks.Done()
 			}
-		}
-	}
-}
-
-func extractLinksFromPage(ctx context.Context, opts Options, rootURL *url.URL,
-	pageURL string, limiter *rateLimiter, assetCache *assetCache) ([]string, error) {
-	if err := limiter.Wait(ctx); err != nil {
-		return nil, err
+		}()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if err != nil {
-		return nil, err
+	visited[rawRoot] = true
+	activeTasks.Add(1)
+	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
+
+	go func() {
+		activeTasks.Wait()
+		close(taskChan)
+	}()
+
+	workersWg.Wait()
+
+	for _, page := range pagesMap {
+		report.Pages = append(report.Pages, page)
 	}
 
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-
-	resp, err := doRequestWithRetry(ctx, opts, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	links, err := extractLinksFromHTML(body, pageURL)
-	if err != nil {
-		return nil, err
-	}
-
-	internalLinks := make([]string, 0)
-	for _, link := range links {
-		linkURL, err := url.Parse(link)
-		if err != nil {
-			continue
-		}
-
-		if linkURL.Host == rootURL.Host {
-			linkURL.Fragment = ""
-			internalLinks = append(internalLinks, linkURL.String())
-		}
-	}
-
-	return internalLinks, nil
-}
-
-func fetchPage(ctx context.Context, opts Options, pageURL string, depth int,
-	assetCache *assetCache) (Page, error) {
-	page := Page{
-		URL:          pageURL,
-		Depth:        depth,
-		HTTPStatus:   0,
-		Status:       "",
-		Error:        "",
-		BrokenLinks:  []BrokenLink{},
-		Assets:       []Asset{},
-		SEO:          SEO{HasTitle: false, Title: "", HasDescription: false, Description: "", HasH1: false, H1: ""},
-		DiscoveredAt: time.Now().UTC(),
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if err != nil {
-		page.Status = "error"
-		page.Error = fmt.Sprintf("failed to create request: %v", err)
-		return page, nil
-	}
-
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-
-	resp, err := doRequestWithRetry(ctx, opts, req)
-	if err != nil {
-		page.Status = "error"
-		page.Error = fmt.Sprintf("request failed: %v", err)
-		return page, nil
-	}
-	defer resp.Body.Close()
-
-	page.HTTPStatus = resp.StatusCode
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		page.Status = "ok"
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			page.Error = fmt.Sprintf("failed to read response body: %v", err)
-			return page, nil
-		}
-
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
-		if err != nil {
-			page.Error = fmt.Sprintf("failed to parse HTML: %v", err)
-			return page, nil
-		}
-
-		page.SEO = extractSEOFromDoc(doc)
-		page.Assets = extractAssets(ctx, opts, doc, pageURL, assetCache)
-
-		allLinks, err := extractLinksFromHTML(body, pageURL)
-		if err != nil {
-			page.Error = fmt.Sprintf("failed to parse links: %v", err)
-			return page, nil
-		}
-
-		for _, link := range allLinks {
-			brokenLink := checkLinkWithRetry(ctx, opts, link)
-			if brokenLink != nil {
-				page.BrokenLinks = append(page.BrokenLinks, *brokenLink)
-			}
-		}
-	} else {
-		page.Status = "error"
-		page.Error = fmt.Sprintf("HTTP status: %d", resp.StatusCode)
-	}
-
-	return page, nil
-}
-
-func checkLinkWithRetry(ctx context.Context, opts Options, linkURL string) *BrokenLink {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, linkURL, nil)
-	if err != nil {
-		return &BrokenLink{
-			URL:        linkURL,
-			StatusCode: 0,
-			Error:      fmt.Sprintf("failed to create request: %v", err),
-		}
-	}
-
-	if opts.UserAgent != "" {
-		req.Header.Set("User-Agent", opts.UserAgent)
-	}
-
-	resp, err := doRequestWithRetry(ctx, opts, req)
-	if err != nil {
-		return &BrokenLink{
-			URL:        linkURL,
-			StatusCode: 0,
-			Error:      err.Error(),
-		}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return &BrokenLink{
-			URL:        linkURL,
-			StatusCode: resp.StatusCode,
-			Error:      fmt.Sprintf("HTTP status: %d", resp.StatusCode),
-		}
-	}
-
-	return nil
-}
-
-func extractSEOFromDoc(doc *goquery.Document) SEO {
-	seo := SEO{
-		HasTitle:       false,
-		Title:          "",
-		HasDescription: false,
-		Description:    "",
-		HasH1:          false,
-		H1:             "",
-	}
-
-	doc.Find("title").Each(func(i int, s *goquery.Selection) {
-		title := s.Text()
-		if title != "" {
-			seo.HasTitle = true
-			seo.Title = decodeHTMLEntities(title)
-		}
+	sort.Slice(report.Pages, func(i, j int) bool {
+		return report.Pages[i].URL < report.Pages[j].URL
 	})
 
-	doc.Find("meta[name='description']").Each(func(i int, s *goquery.Selection) {
-		description, exists := s.Attr("content")
-		if exists && description != "" {
-			seo.HasDescription = true
-			seo.Description = decodeHTMLEntities(description)
-		}
-	})
+	if opts.IndentJSON {
+		return json.MarshalIndent(report, "", "  ")
+	}
+	return json.Marshal(report)
+}
 
-	doc.Find("h1").Each(func(i int, s *goquery.Selection) {
-		if i == 0 {
-			h1 := s.Text()
-			if h1 != "" {
-				seo.HasH1 = true
-				seo.H1 = decodeHTMLEntities(h1)
-			}
-		}
-	})
+func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return "", err
+	}
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), nil
+}
 
+func extractSEO(html string) *SEO {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return &SEO{}
+	}
+	seo := &SEO{}
+	titleTag := doc.Find("title").First()
+	if titleTag.Length() > 0 {
+		seo.Title = strings.TrimSpace(titleTag.Text())
+		seo.HasTitle = seo.Title != ""
+	}
+	desc, exists := doc.Find("meta[name='description']").Attr("content")
+	if exists {
+		seo.Description = strings.TrimSpace(desc)
+		seo.HasDescription = seo.Description != ""
+	}
+	seo.HasH1 = doc.Find("h1").Length() > 0
 	return seo
 }
 
-func decodeHTMLEntities(text string) string {
-	return html.UnescapeString(strings.TrimSpace(text))
+func extractLinks(html string) []string {
+	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(html))
+	var links []string
+	doc.Find("a").Each(func(i int, s *goquery.Selection) {
+		if href, ok := s.Attr("href"); ok {
+			links = append(links, href)
+		}
+	})
+	return links
 }
 
-func extractLinksFromHTML(body []byte, baseURL string) ([]string, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	links := make([]string, 0)
-	seen := make(map[string]bool)
-
-	var extract func(*html.Node)
-	extract = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					href, err := url.Parse(attr.Val)
-					if err != nil {
-						continue
-					}
-
-					absURL := base.ResolveReference(href)
-
-					if absURL.Scheme == "http" || absURL.Scheme == "https" {
-						absURL.Fragment = ""
-						urlStr := absURL.String()
-
-						if !seen[urlStr] {
-							seen[urlStr] = true
-							links = append(links, urlStr)
-						}
-					}
-					break
-				}
-			}
+func ExtractAssetURLs(html string) []string {
+	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(html))
+	var assets []string
+	doc.Find("img, script, link[rel='stylesheet']").Each(func(i int, s *goquery.Selection) {
+		if src, ok := s.Attr("src"); ok {
+			assets = append(assets, src)
+		} else if href, ok := s.Attr("href"); ok {
+			assets = append(assets, href)
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			extract(c)
+	})
+	return assets
+}
+
+func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) (Asset, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return Asset{}, err
+	}
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Asset{}, err
+	}
+	defer resp.Body.Close()
+
+	assetType := "unknown"
+	if strings.Contains(urlStr, ".js") {
+		assetType = "script"
+	} else if strings.Contains(urlStr, ".css") {
+		assetType = "style"
+	} else if strings.Contains(urlStr, ".png") || strings.Contains(urlStr, ".jpg") || strings.Contains(urlStr, ".svg") {
+		assetType = "image"
+	}
+
+	return Asset{
+		URL:        urlStr,
+		Type:       assetType,
+		StatusCode: resp.StatusCode,
+		SizeBytes:  resp.ContentLength,
+	}, nil
+}
+
+func NormalizeURL(href string, base *url.URL) (string, error) {
+	u, err := url.Parse(href)
+	if err != nil {
+		return "", err
+	}
+	var resolved *url.URL
+	if base != nil {
+		resolved = base.ResolveReference(u)
+	} else {
+		resolved = u
+	}
+	resolved.Fragment = ""
+	resStr := resolved.String()
+	if strings.HasSuffix(resStr, "/") && len(resStr) > (len(resolved.Scheme)+3+len(resolved.Host)) {
+		resStr = strings.TrimSuffix(resStr, "/")
+	}
+	return resStr, nil
+}
+
+func IsSameDomain(u1, u2 *url.URL) bool {
+	return u1.Host == u2.Host
+}
+
+func ShouldCheckAsset(urlStr string) bool {
+	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
+}
+
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Page, error) {
+	page := Page{
+		URL:          pageURL,
+		Depth:        depth,
+		DiscoveredAt: time.Now().UTC(),
+		SEO:          &SEO{},
+	}
+
+	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page, nil
+	}
+
+	page.SEO = extractSEO(html)
+	page.Status = "ok"
+	page.HTTPStatus = 200
+	page.BrokenLinks = make([]BrokenLink, 0)
+	page.Assets = make([]Asset, 0)
+
+	baseURL, _ := url.Parse(pageURL)
+	rawAssets := ExtractAssetURLs(html)
+
+	var assets []Asset
+	for _, assetURL := range rawAssets {
+		abs, _ := NormalizeURL(assetURL, baseURL)
+		if !ShouldCheckAsset(abs) {
+			continue
+		}
+
+		assetMu.RLock()
+		cached, exists := assetCache[abs]
+		assetMu.RUnlock()
+
+		if exists {
+			assets = append(assets, cached.asset)
+			continue
+		}
+
+		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		if err == nil {
+			assetMu.Lock()
+			assetCache[abs] = assetCacheItem{asset: asset}
+			assetMu.Unlock()
+			assets = append(assets, asset)
 		}
 	}
-	extract(doc)
 
-	return links, nil
+	sort.Slice(assets, func(i, j int) bool {
+		if assets[i].Type != assets[j].Type {
+			return assets[i].Type < assets[j].Type
+		}
+		return assets[i].URL < assets[j].URL
+	})
+
+	if len(assets) > 0 {
+		page.Assets = assets
+	}
+
+	return page, nil
 }
