@@ -353,20 +353,30 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		}
 	}()
 
-	select {
-	case tasks <- crawlTask{url: opts.URL, depth: 0}:
-	case <-ctx.Done():
-		cancel()
-	}
-
 	go func() {
 		wg.Wait()
 		close(tasks)
 		close(results)
 	}()
+	select {
+	case tasks <- crawlTask{url: opts.URL, depth: 0}:
+	case <-ctx.Done():
+		cancel()
+		return nil, ctx.Err()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-	<-workerCtx.Done()
-
+	select {
+	case <-done:
+	case <-ctx.Done():
+		cancel()
+		return nil, ctx.Err()
+	}
+	time.Sleep(100 * time.Millisecond)
 	var jsonData []byte
 	if opts.IndentJSON {
 		jsonData, err = json.MarshalIndent(report, "", "  ")
@@ -433,7 +443,6 @@ func worker(ctx context.Context, opts Options, rootURL *url.URL, limiter *rateLi
 			case <-ctx.Done():
 				return
 			}
-
 			if t.depth < opts.Depth && page.Status == "ok" {
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.url, nil)
 				if err != nil {
@@ -468,10 +477,12 @@ func worker(ctx context.Context, opts Options, rootURL *url.URL, limiter *rateLi
 						linkURL.Fragment = ""
 						normalizedLink := linkURL.String()
 
-						select {
-						case tasks <- crawlTask{url: normalizedLink, depth: t.depth + 1}:
-						case <-ctx.Done():
-							return
+						if t.depth+1 <= opts.Depth {
+							select {
+							case tasks <- crawlTask{url: normalizedLink, depth: t.depth + 1}:
+							case <-ctx.Done():
+								return
+							}
 						}
 					}
 				}
