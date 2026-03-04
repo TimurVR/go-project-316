@@ -67,7 +67,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
-	}	
+	}
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
 
@@ -265,17 +265,17 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 	assetType := "other"
 	lowerURL := strings.ToLower(urlStr)
 	
-	switch {
-	case strings.Contains(lowerURL, ".js"):
+	if strings.Contains(lowerURL, ".js") {
 		assetType = "script"
-	case strings.Contains(lowerURL, ".css"):
+	} else if strings.Contains(lowerURL, ".css") {
 		assetType = "style"
-	case strings.Contains(lowerURL, ".png"), 
-		 strings.Contains(lowerURL, ".jpg"), 
-		 strings.Contains(lowerURL, ".jpeg"),
-		 strings.Contains(lowerURL, ".gif"),
-		 strings.Contains(lowerURL, ".svg"),
-		 strings.Contains(lowerURL, ".webp"):
+	} else if strings.Contains(lowerURL, ".png") || 
+			   strings.Contains(lowerURL, ".jpg") || 
+			   strings.Contains(lowerURL, ".jpeg") ||
+			   strings.Contains(lowerURL, ".gif") ||
+			   strings.Contains(lowerURL, ".svg") ||
+			   strings.Contains(lowerURL, ".webp") ||
+			   strings.Contains(lowerURL, ".ico") {
 		assetType = "image"
 	}
 	var size int64 = 0
@@ -329,8 +329,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		BrokenLinks:  nil,
-		Assets:       nil,
+		BrokenLinks:  make([]BrokenLink, 0),
+		Assets:       make([]Asset, 0),
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
@@ -346,74 +346,63 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 
 	baseURL, _ := url.Parse(pageURL)
 	assetURLs := ExtractAssetURLs(html)
-	if len(assetURLs) > 0 {
-		var assets []Asset
-		for _, assetURL := range assetURLs {
-			abs, _ := NormalizeURL(assetURL, baseURL)
-			if !ShouldCheckAsset(abs) {
-				continue
-			}
-
-			assetMu.RLock()
-			cached, exists := assetCache[abs]
-			assetMu.RUnlock()
-
-			if exists {
-				assets = append(assets, cached.asset)
-				continue
-			}
-
-			asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
-			if err == nil {
-				assetMu.Lock()
-				assetCache[abs] = assetCacheItem{asset: asset}
-				assetMu.Unlock()
-				assets = append(assets, asset)
-			}
+	for _, assetURL := range assetURLs {
+		abs, _ := NormalizeURL(assetURL, baseURL)
+		if !ShouldCheckAsset(abs) {
+			continue
 		}
-		
-		if len(assets) > 0 {
-			page.Assets = assets
+
+		assetMu.RLock()
+		cached, exists := assetCache[abs]
+		assetMu.RUnlock()
+
+		if exists {
+			page.Assets = append(page.Assets, cached.asset)
+			continue
+		}
+
+		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		if err == nil {
+			assetMu.Lock()
+			assetCache[abs] = assetCacheItem{asset: asset}
+			assetMu.Unlock()
+			page.Assets = append(page.Assets, asset)
 		}
 	}
 	linkURLs := extractLinks(html)
-	if len(linkURLs) > 0 {
-		var brokenLinks []BrokenLink
-		for _, link := range linkURLs {
-			absLink, _ := NormalizeURL(link, baseURL)
-			if absLink == "" {
-				continue
-			}
-			req, err := http.NewRequestWithContext(ctx, "HEAD", absLink, nil)
-			if err != nil {
-				continue
-			}
-			if opts.UserAgent != "" {
-				req.Header.Set("User-Agent", opts.UserAgent)
-			}
-			
-			resp, err := opts.HTTPClient.Do(req)
-			if err != nil {
-				brokenLinks = append(brokenLinks, BrokenLink{
-					URL:        absLink,
-					StatusCode: 0,
-					Error:      err.Error(),
-				})
-				continue
-			}
-			resp.Body.Close()
-			
-			if resp.StatusCode >= 400 {
-				brokenLinks = append(brokenLinks, BrokenLink{
-					URL:        absLink,
-					StatusCode: resp.StatusCode,
-					Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
-				})
-			}
+	for _, link := range linkURLs {
+		absLink, _ := NormalizeURL(link, baseURL)
+		if absLink == "" {
+			continue
+		}
+		if !strings.HasPrefix(absLink, "http") {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, "HEAD", absLink, nil)
+		if err != nil {
+			continue
+		}
+		if opts.UserAgent != "" {
+			req.Header.Set("User-Agent", opts.UserAgent)
 		}
 		
-		if len(brokenLinks) > 0 {
-			page.BrokenLinks = brokenLinks
+		resp, err := opts.HTTPClient.Do(req)
+		if err != nil {
+			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
+				URL:        absLink,
+				StatusCode: 0,
+				Error:      err.Error(),
+			})
+			continue
+		}
+		resp.Body.Close()
+		
+		if resp.StatusCode >= 400 {
+			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
+				URL:        absLink,
+				StatusCode: resp.StatusCode,
+				Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+			})
 		}
 	}
 
