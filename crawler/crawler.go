@@ -183,7 +183,7 @@ func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client,
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return string(body), nil
 }
@@ -268,7 +268,7 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 			SizeBytes:  0,
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assetType := "other"
 	lowerURL := strings.ToLower(urlStr)
 	
@@ -374,8 +374,6 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		assetMu.Unlock()
 		page.Assets = append(page.Assets, asset)
 	}
-
-	// Проверяем ссылки на битые
 	linkURLs := extractLinks(html)
 	for _, link := range linkURLs {
 		absLink, _ := NormalizeURL(link, baseURL)
@@ -402,7 +400,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 			})
 			continue
 		}
-		resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode >= 400 {
 			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
