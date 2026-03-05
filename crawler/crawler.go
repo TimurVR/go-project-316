@@ -128,7 +128,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 								visitedMu.Lock()
 								if !visited[absLink] {
 									visited[absLink] = true
-									if task.Depth+1 < opts.Depth { 
+									if task.Depth+1 < opts.Depth {
 										activeTasks.Add(1)
 										select {
 										case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
@@ -242,39 +242,49 @@ func ExtractAssetURLs(html string) []string {
 		}
 	})
 	
-	if len(assets) == 0 {
-		return nil
-	}
 	return assets
 }
 
-func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) (Asset, error) {
+func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) Asset {
 	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
-		return Asset{}, err
+		return Asset{
+			URL:        urlStr,
+			Type:       "other",
+			StatusCode: 0,
+			SizeBytes:  0,
+			Error:      err.Error(),
+		}
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
-	}	
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return Asset{}, err
+		return Asset{
+			URL:        urlStr,
+			Type:       "other",
+			StatusCode: 0,
+			SizeBytes:  0,
+			Error:      err.Error(),
+		}
 	}
 	defer resp.Body.Close()
 	assetType := "other"
 	lowerURL := strings.ToLower(urlStr)
-	
+
 	if strings.Contains(lowerURL, ".js") {
 		assetType = "script"
 	} else if strings.Contains(lowerURL, ".css") {
 		assetType = "style"
-	} else if strings.Contains(lowerURL, ".png") || 
-			   strings.Contains(lowerURL, ".jpg") || 
-			   strings.Contains(lowerURL, ".jpeg") ||
-			   strings.Contains(lowerURL, ".gif") ||
-			   strings.Contains(lowerURL, ".svg") ||
-			   strings.Contains(lowerURL, ".webp") ||
-			   strings.Contains(lowerURL, ".ico") {
+	} else if strings.Contains(lowerURL, ".png") ||
+		strings.Contains(lowerURL, ".jpg") ||
+		strings.Contains(lowerURL, ".jpeg") ||
+		strings.Contains(lowerURL, ".gif") ||
+		strings.Contains(lowerURL, ".svg") ||
+		strings.Contains(lowerURL, ".webp") ||
+		strings.Contains(lowerURL, ".ico") {
 		assetType = "image"
 	}
 	var size int64 = 0
@@ -287,12 +297,18 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 		}
 	}
 
+	var errorMsg string
+	if resp.StatusCode >= 400 {
+		errorMsg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+
 	return Asset{
 		URL:        urlStr,
 		Type:       assetType,
 		StatusCode: resp.StatusCode,
 		SizeBytes:  size,
-	}, nil
+		Error:      errorMsg,
+	}
 }
 
 func NormalizeURL(href string, base *url.URL) (string, error) {
@@ -328,20 +344,22 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
 		SEO:          &SEO{},
-		BrokenLinks:  make([]BrokenLink, 0),
-		Assets:       make([]Asset, 0),
 	}
 
 	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
+		page.Assets = nil
+		page.BrokenLinks = nil
 		return page, nil
 	}
 
 	page.SEO = extractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
+	page.Assets = make([]Asset, 0)
+	page.BrokenLinks = make([]BrokenLink, 0)
 
 	baseURL, _ := url.Parse(pageURL)
 	assetURLs := ExtractAssetURLs(html)
@@ -358,14 +376,14 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 			page.Assets = append(page.Assets, cached.asset)
 			continue
 		}
-		asset, err := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
-		if err == nil {
-			assetMu.Lock()
-			assetCache[abs] = assetCacheItem{asset: asset}
-			assetMu.Unlock()
-			page.Assets = append(page.Assets, asset)
-		}
+		asset := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		assetMu.Lock()
+		assetCache[abs] = assetCacheItem{asset: asset}
+		assetMu.Unlock()
+		page.Assets = append(page.Assets, asset)
 	}
+
+	// Проверяем ссылки на битые
 	linkURLs := extractLinks(html)
 	for _, link := range linkURLs {
 		absLink, _ := NormalizeURL(link, baseURL)
@@ -382,7 +400,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		if opts.UserAgent != "" {
 			req.Header.Set("User-Agent", opts.UserAgent)
 		}
-		
+
 		resp, err := opts.HTTPClient.Do(req)
 		if err != nil {
 			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
@@ -393,7 +411,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 			continue
 		}
 		resp.Body.Close()
-		
+
 		if resp.StatusCode >= 400 {
 			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
 				URL:        absLink,
