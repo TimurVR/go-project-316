@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	code "code/crawler"
 	"time"
 
+	code "code/crawler"
 	"github.com/urfave/cli/v3"
 )
 
@@ -18,34 +18,46 @@ func main() {
 		UsageText: "hexlet-go-crawler [global options] <url>",
 		Flags: []cli.Flag{
 			&cli.IntFlag{
-				Name:  "depth",
-				Value: 10,
-				Usage: "crawl depth",
+				Name:     "depth",
+				Value:    10,
+				Usage:    "crawl depth",
+				Category: "GLOBAL OPTIONS:",
 			},
 			&cli.IntFlag{
-				Name:  "retries",
-				Value: 1,
-				Usage: "number of retries for failed requests",
+				Name:     "retries",
+				Value:    1,
+				Usage:    "number of retries for failed requests",
+				Category: "GLOBAL OPTIONS:",
 			},
 			&cli.DurationFlag{
-				Name:  "delay",
-				Value: 0,
-				Usage: "delay between requests (example: 200ms, 1s)",
+				Name:     "delay",
+				Value:    0,
+				Usage:    "delay between requests (example: 200ms, 1s)",
+				Category: "GLOBAL OPTIONS:",
 			},
 			&cli.DurationFlag{
-				Name:  "timeout",
-				Value: 15,
-				Usage: "per-request timeout in seconds",
+				Name:     "timeout",
+				Value:    15 * time.Second,
+				Usage:    "per-request timeout (default: 15s)",
+				Category: "GLOBAL OPTIONS:",
+			},
+			&cli.FloatFlag{
+				Name:     "rps",
+				Value:    0,
+				Usage:    "limit requests per second (overrides delay)",
+				Category: "GLOBAL OPTIONS:",
 			},
 			&cli.StringFlag{
-				Name:  "user-agent",
-				Value: "HexletGoCrawler/1.0",
-				Usage: "custom user agent",
+				Name:     "user-agent",
+				Value:    "",
+				Usage:    "custom user agent",
+				Category: "GLOBAL OPTIONS:",
 			},
 			&cli.IntFlag{
-				Name:  "workers",
-				Value: 4,
-				Usage: "number of concurrent workers",
+				Name:     "workers",
+				Value:    4,
+				Usage:    "number of concurrent workers",
+				Category: "GLOBAL OPTIONS:",
 			},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
@@ -58,7 +70,8 @@ func main() {
 				Depth:       c.Int("depth"),
 				Retries:     c.Int("retries"),
 				Delay:       c.Duration("delay"),
-				Timeout:     c.Duration("timeout") * time.Second,
+				Timeout:     c.Duration("timeout"),
+				RPS:         c.Float("rps"),
 				UserAgent:   c.String("user-agent"),
 				Concurrency: c.Int("workers"),
 				IndentJSON:  true,
