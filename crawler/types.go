@@ -19,7 +19,6 @@ type Asset struct {
 	Type       string `json:"type"`
 	StatusCode int    `json:"status_code"`
 	SizeBytes  int64  `json:"size_bytes"`
-	Error      string `json:"error"`
 }
 
 type Options struct {

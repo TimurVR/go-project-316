@@ -253,13 +253,12 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 			Type:       "other",
 			StatusCode: 0,
 			SizeBytes:  0,
-			Error:      err.Error(),
 		}
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
-
+	
 	resp, err := client.Do(req)
 	if err != nil {
 		return Asset{
@@ -267,24 +266,23 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 			Type:       "other",
 			StatusCode: 0,
 			SizeBytes:  0,
-			Error:      err.Error(),
 		}
 	}
 	defer resp.Body.Close()
 	assetType := "other"
 	lowerURL := strings.ToLower(urlStr)
-
+	
 	if strings.Contains(lowerURL, ".js") {
 		assetType = "script"
 	} else if strings.Contains(lowerURL, ".css") {
 		assetType = "style"
-	} else if strings.Contains(lowerURL, ".png") ||
-		strings.Contains(lowerURL, ".jpg") ||
-		strings.Contains(lowerURL, ".jpeg") ||
-		strings.Contains(lowerURL, ".gif") ||
-		strings.Contains(lowerURL, ".svg") ||
-		strings.Contains(lowerURL, ".webp") ||
-		strings.Contains(lowerURL, ".ico") {
+	} else if strings.Contains(lowerURL, ".png") || 
+			   strings.Contains(lowerURL, ".jpg") || 
+			   strings.Contains(lowerURL, ".jpeg") ||
+			   strings.Contains(lowerURL, ".gif") ||
+			   strings.Contains(lowerURL, ".svg") ||
+			   strings.Contains(lowerURL, ".webp") ||
+			   strings.Contains(lowerURL, ".ico") {
 		assetType = "image"
 	}
 	var size int64 = 0
@@ -297,17 +295,11 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 		}
 	}
 
-	var errorMsg string
-	if resp.StatusCode >= 400 {
-		errorMsg = fmt.Sprintf("HTTP %d", resp.StatusCode)
-	}
-
 	return Asset{
 		URL:        urlStr,
 		Type:       assetType,
 		StatusCode: resp.StatusCode,
 		SizeBytes:  size,
-		Error:      errorMsg,
 	}
 }
 
