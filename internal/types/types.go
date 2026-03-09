@@ -2,7 +2,6 @@ package crawler
 
 import (
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -64,12 +63,6 @@ type CrawlTask struct {
 	Depth int
 }
 
-type RateLimiter struct {
-	lastRequest time.Time
-	minInterval time.Duration
-	mu          sync.Mutex
-}
-
-type assetCacheItem struct {
-	asset Asset
+type AssetCacheItem struct {
+	Asset Asset
 }

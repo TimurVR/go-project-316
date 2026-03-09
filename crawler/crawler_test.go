@@ -1,6 +1,9 @@
 package crawler
 
 import (
+	fetcher "code/internal/fetcher"
+	parser "code/internal/parser"
+	types "code/internal/types"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -29,7 +32,7 @@ func TestNewRateLimiter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rl := NewRateLimiter(tt.delay, tt.rps)
+			rl := fetcher.NewRateLimiter(tt.delay, tt.rps)
 			if tt.wantNil {
 				if rl != nil {
 					t.Error("Expected nil, got rate limiter")
@@ -39,15 +42,15 @@ func TestNewRateLimiter(t *testing.T) {
 			if rl == nil {
 				t.Fatal("Expected rate limiter, got nil")
 			}
-			if rl.minInterval != tt.expected {
-				t.Errorf("Expected minInterval %v, got %v", tt.expected, rl.minInterval)
+			if rl.MinInterval != tt.expected {
+				t.Errorf("Expected minInterval %v, got %v", tt.expected, rl.MinInterval)
 			}
 		})
 	}
 }
 
 func TestRateLimiterWait(t *testing.T) {
-	rl := NewRateLimiter(100*time.Millisecond, 0)
+	rl := fetcher.NewRateLimiter(100*time.Millisecond, 0)
 	if rl == nil {
 		t.Fatal("Failed to create rate limiter")
 	}
@@ -72,12 +75,12 @@ func TestExtractSEO(t *testing.T) {
 	tests := []struct {
 		name     string
 		html     string
-		expected SEO
+		expected types.SEO
 	}{
 		{
 			name: "all seo elements",
 			html: `<html><head><title>Test Title</title><meta name="description" content="Test Description"></head><body><h1>Test H1</h1></body></html>`,
-			expected: SEO{
+			expected: types.SEO{
 				HasTitle:       true,
 				Title:          "Test Title",
 				HasDescription: true,
@@ -88,7 +91,7 @@ func TestExtractSEO(t *testing.T) {
 		{
 			name: "no seo elements",
 			html: `<html><body><p>No SEO</p></body></html>`,
-			expected: SEO{
+			expected: types.SEO{
 				HasTitle:       false,
 				Title:          "",
 				HasDescription: false,
@@ -99,7 +102,7 @@ func TestExtractSEO(t *testing.T) {
 		{
 			name: "title only",
 			html: `<html><head><title>Only Title</title></head><body></body></html>`,
-			expected: SEO{
+			expected: types.SEO{
 				HasTitle:       true,
 				Title:          "Only Title",
 				HasDescription: false,
@@ -110,7 +113,7 @@ func TestExtractSEO(t *testing.T) {
 		{
 			name: "trim whitespace",
 			html: `<html><head><title>  Trimmed Title  </title><meta name="description" content="  Trimmed Description  "></head><body><h1>  Trimmed H1  </h1></body></html>`,
-			expected: SEO{
+			expected: types.SEO{
 				HasTitle:       true,
 				Title:          "Trimmed Title",
 				HasDescription: true,
@@ -122,7 +125,7 @@ func TestExtractSEO(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			seo := extractSEO(tt.html)
+			seo := parser.ExtractSEO(tt.html)
 			if seo.HasTitle != tt.expected.HasTitle {
 				t.Errorf("HasTitle: expected %v, got %v", tt.expected.HasTitle, seo.HasTitle)
 			}
@@ -154,7 +157,7 @@ func TestExtractLinks(t *testing.T) {
 		</html>
 	`
 
-	links := extractLinks(html)
+	links := parser.ExtractLinks(html)
 	expected := []string{"/page1", "https://example.com/page2", "#anchor", "mailto:test@example.com"}
 
 	if len(links) != len(expected) {
@@ -181,7 +184,7 @@ func TestExtractAssetURLs(t *testing.T) {
 		</html>
 	`
 
-	assets := ExtractAssetURLs(html)
+	assets := parser.ExtractAssetURLs(html)
 	expected := []string{"/image.png", "/script.js", "/style.css"}
 
 	if len(assets) != len(expected) {
@@ -241,7 +244,7 @@ func TestGetHTMLWithContext(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	html, err := GetHTMLWithContext(context.Background(), server.URL, client, "TestBot/1.0")
+	html, err := fetcher.GetHTMLWithContext(context.Background(), server.URL, client, "TestBot/1.0")
 	if err != nil {
 		t.Fatalf("GetHTMLWithContext failed: %v", err)
 	}
@@ -252,7 +255,7 @@ func TestGetHTMLWithContext(t *testing.T) {
 
 func TestGetHTMLWithContextError(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := GetHTMLWithContext(context.Background(), "http://invalid.url.test", client, "")
+	_, err := fetcher.GetHTMLWithContext(context.Background(), "http://invalid.url.test", client, "")
 	if err == nil {
 		t.Error("Expected error for invalid URL, got nil")
 	}
@@ -294,7 +297,7 @@ func TestCrawlPageSuccess(t *testing.T) {
 		Timeout: 5 * time.Second,
 	}
 
-	opts := Options{
+	opts := types.Options{
 		HTTPClient: client,
 		UserAgent:  "TestBot/1.0",
 	}
@@ -316,14 +319,14 @@ func TestCrawlPageSuccess(t *testing.T) {
 	if page.SEO.Title != "Test Page" {
 		t.Errorf("Expected title 'Test Page', got %q", page.SEO.Title)
 	}
-	if len(page.Assets) != 2 { 
+	if len(page.Assets) != 2 {
 		t.Errorf("Expected 2 assets, got %d", len(page.Assets))
 	}
 }
 
 func TestCrawlPageError(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	opts := Options{
+	opts := types.Options{
 		HTTPClient: client,
 	}
 
@@ -349,7 +352,7 @@ func TestCrawlPageError(t *testing.T) {
 // --- Тесты для Analyze ---
 
 func TestAnalyzeWithInvalidURL(t *testing.T) {
-	opts := Options{
+	opts := types.Options{
 		URL:        "",
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -370,7 +373,7 @@ func TestAnalyzeSinglePage(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	opts := Options{
+	opts := types.Options{
 		URL:         server.URL,
 		Depth:       0,
 		HTTPClient:  client,
@@ -382,7 +385,7 @@ func TestAnalyzeSinglePage(t *testing.T) {
 		t.Fatalf("Analyze failed: %v", err)
 	}
 
-	var report Report
+	var report types.Report
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("Failed to unmarshal report: %v", err)
 	}
@@ -437,7 +440,7 @@ func TestAnalyzeWithAssets(t *testing.T) {
 		Timeout: 5 * time.Second,
 	}
 
-	opts := Options{
+	opts := types.Options{
 		URL:         mainServer.URL,
 		Depth:       0,
 		HTTPClient:  client,
@@ -449,7 +452,7 @@ func TestAnalyzeWithAssets(t *testing.T) {
 		t.Fatalf("Analyze failed: %v", err)
 	}
 
-	var report Report
+	var report types.Report
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("Failed to unmarshal report: %v", err)
 	}
@@ -507,7 +510,7 @@ func TestAnalyzeWithBrokenLinks(t *testing.T) {
 		Timeout: 5 * time.Second,
 	}
 
-	opts := Options{
+	opts := types.Options{
 		URL:         mainServer.URL,
 		Depth:       0,
 		HTTPClient:  client,
@@ -519,7 +522,7 @@ func TestAnalyzeWithBrokenLinks(t *testing.T) {
 		t.Fatalf("Analyze failed: %v", err)
 	}
 
-	var report Report
+	var report types.Report
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("Failed to unmarshal report: %v", err)
 	}
@@ -550,7 +553,7 @@ func TestAnalyzeContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	opts := Options{
+	opts := types.Options{
 		URL:         server.URL,
 		Depth:       0,
 		HTTPClient:  client,
@@ -564,7 +567,7 @@ func TestAnalyzeContextCancellation(t *testing.T) {
 	if err != nil {
 		t.Logf("Got expected error: %v", err)
 	} else {
-		var report Report
+		var report types.Report
 		if err := json.Unmarshal(data, &report); err != nil {
 			t.Errorf("Failed to unmarshal report: %v", err)
 		}
@@ -640,7 +643,7 @@ func TestAnalyzeJSONOutput(t *testing.T) {
 		Timeout: 5 * time.Second,
 	}
 
-	opts := Options{
+	opts := types.Options{
 		URL:         server.URL,
 		Depth:       0,
 		HTTPClient:  client,
@@ -653,7 +656,7 @@ func TestAnalyzeJSONOutput(t *testing.T) {
 		t.Fatalf("Analyze failed: %v", err)
 	}
 
-	var report Report
+	var report types.Report
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("Failed to unmarshal report: %v", err)
 	}

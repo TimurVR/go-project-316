@@ -1,13 +1,14 @@
 package main
 
 import (
+	code "code/crawler"
+	types "code/internal/types"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
-	code "code/crawler"
 	"github.com/urfave/cli/v3"
 )
 
@@ -65,7 +66,7 @@ func main() {
 				return cli.Exit("URL обязателен для анализа\nИспользование: hexlet-go-crawler [опции] <url>", 1)
 			}
 			url := c.Args().First()
-			opts := code.Options{
+			opts := types.Options{
 				URL:         url,
 				Depth:       c.Int("depth"),
 				Retries:     c.Int("retries"),

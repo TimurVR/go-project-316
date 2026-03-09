@@ -4,58 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	fetcher "code/internal/fetcher"
+	parser "code/internal/parser"
+	types "code/internal/types"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/PuerkitoBio/goquery"
 )
 
 var (
-	assetCache = make(map[string]assetCacheItem)
+	assetCache = make(map[string]types.AssetCacheItem)
 	assetMu    sync.RWMutex
 )
 
-func NewRateLimiter(delay time.Duration, rps float64) *RateLimiter {
-	var minInterval time.Duration
-	if rps > 0 {
-		minInterval = time.Duration(float64(time.Second) / rps)
-	} else if delay > 0 {
-		minInterval = delay
-	} else {
-		return nil
-	}
-	return &RateLimiter{
-		minInterval: minInterval,
-		lastRequest: time.Now().Add(-minInterval),
-	}
-}
-
-func (rl *RateLimiter) Wait(ctx context.Context) error {
-	if rl == nil {
-		return nil
-	}
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	now := time.Now()
-	elapsed := now.Sub(rl.lastRequest)
-	if elapsed < rl.minInterval {
-		waitTime := rl.minInterval - elapsed
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(waitTime):
-		}
-	}
-	rl.lastRequest = time.Now()
-	return nil
-}
-
-func Analyze(ctx context.Context, opts Options) ([]byte, error) {
+func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("URL обязателен")
 	}
@@ -70,26 +35,25 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	}
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
-
-	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
-	report := Report{
+	rateLimiter := fetcher.NewRateLimiter(opts.Delay, opts.RPS)
+	report := types.Report{
 		RootURL:     rawRoot,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().UTC(),
-		Pages:       make([]Page, 0),
+		Pages:       make([]types.Page, 0),
 	}
 
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
 	pagesMu := sync.Mutex{}
-	pagesMap := make(map[string]Page)
+	pagesMap := make(map[string]types.Page)
 
-	taskChan := make(chan CrawlTask, 10000)
+	taskChan := make(chan types.CrawlTask, 10000)
 	var activeTasks sync.WaitGroup
 	var workersWg sync.WaitGroup
 
 	assetMu.Lock()
-	assetCache = make(map[string]assetCacheItem)
+	assetCache = make(map[string]types.AssetCacheItem)
 	assetMu.Unlock()
 
 	for i := 0; i < opts.Concurrency; i++ {
@@ -114,10 +78,10 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 				pagesMu.Unlock()
 
 				if task.Depth < opts.Depth && page.Status == "ok" {
-					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
+					html, err := fetcher.GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 					if err == nil {
 						baseURL, _ := url.Parse(page.URL)
-						for _, link := range extractLinks(html) {
+						for _, link := range parser.ExtractLinks(html) {
 							absLink, _ := NormalizeURL(link, baseURL)
 							if absLink == "" {
 								continue
@@ -131,7 +95,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 									if task.Depth+1 < opts.Depth {
 										activeTasks.Add(1)
 										select {
-										case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
+										case taskChan <- types.CrawlTask{URL: absLink, Depth: task.Depth + 1}:
 										case <-ctx.Done():
 											activeTasks.Done()
 										}
@@ -149,7 +113,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 
 	visited[rawRoot] = true
 	activeTasks.Add(1)
-	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
+	taskChan <- types.CrawlTask{URL: rawRoot, Depth: 0}
 
 	go func() {
 		activeTasks.Wait()
@@ -169,138 +133,6 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return json.MarshalIndent(report, "", "  ")
 	}
 	return json.Marshal(report)
-}
-
-func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
-	if err != nil {
-		return "", err
-	}
-	if ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), nil
-}
-
-func extractSEO(html string) *SEO {
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-	if err != nil {
-		return &SEO{}
-	}
-	seo := &SEO{}
-	titleTag := doc.Find("title").First()
-	if titleTag.Length() > 0 {
-		seo.Title = strings.TrimSpace(titleTag.Text())
-		seo.HasTitle = seo.Title != ""
-	}
-	desc, exists := doc.Find("meta[name='description']").Attr("content")
-	if exists {
-		seo.Description = strings.TrimSpace(desc)
-		seo.HasDescription = seo.Description != ""
-	}
-	seo.HasH1 = doc.Find("h1").Length() > 0
-	return seo
-}
-
-func extractLinks(html string) []string {
-	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(html))
-	var links []string
-	doc.Find("a").Each(func(i int, s *goquery.Selection) {
-		if href, ok := s.Attr("href"); ok {
-			links = append(links, href)
-		}
-	})
-	return links
-}
-
-func ExtractAssetURLs(html string) []string {
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-	if err != nil {
-		return nil
-	}
-	
-	var assets []string
-	doc.Find("img").Each(func(i int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok && src != "" {
-			assets = append(assets, src)
-		}
-	})
-	doc.Find("script").Each(func(i int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok && src != "" {
-			assets = append(assets, src)
-		}
-	})
-	doc.Find("link[rel='stylesheet']").Each(func(i int, s *goquery.Selection) {
-		if href, ok := s.Attr("href"); ok && href != "" {
-			assets = append(assets, href)
-		}
-	})
-	
-	return assets
-}
-
-func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) Asset {
-	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
-	if err != nil {
-		return Asset{
-			URL:        urlStr,
-			Type:       "other",
-			StatusCode: 0,
-			SizeBytes:  0,
-		}
-	}
-	if ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	
-	resp, err := client.Do(req)
-	if err != nil {
-		return Asset{
-			URL:        urlStr,
-			Type:       "other",
-			StatusCode: 0,
-			SizeBytes:  0,
-		}
-	}
-	defer func() { _ = resp.Body.Close() }()
-	assetType := "other"
-	lowerURL := strings.ToLower(urlStr)
-	
-	if strings.Contains(lowerURL, ".js") {
-		assetType = "script"
-	} else if strings.Contains(lowerURL, ".css") {
-		assetType = "style"
-	} else if strings.Contains(lowerURL, ".png") || 
-			   strings.Contains(lowerURL, ".jpg") || 
-			   strings.Contains(lowerURL, ".jpeg") ||
-			   strings.Contains(lowerURL, ".gif") ||
-			   strings.Contains(lowerURL, ".svg") ||
-			   strings.Contains(lowerURL, ".webp") ||
-			   strings.Contains(lowerURL, ".ico") {
-		assetType = "image"
-	}
-	var size int64 = 0
-	if resp.ContentLength > 0 {
-		size = resp.ContentLength
-	} else {
-		body, err := io.ReadAll(resp.Body)
-		if err == nil {
-			size = int64(len(body))
-		}
-	}
-
-	return Asset{
-		URL:        urlStr,
-		Type:       assetType,
-		StatusCode: resp.StatusCode,
-		SizeBytes:  size,
-	}
 }
 
 func NormalizeURL(href string, base *url.URL) (string, error) {
@@ -330,15 +162,15 @@ func ShouldCheckAsset(urlStr string) bool {
 	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
 }
 
-func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Page, error) {
-	page := Page{
+func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth int) (types.Page, error) {
+	page := types.Page{
 		URL:          pageURL,
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
-		SEO:          &SEO{},
+		SEO:          &types.SEO{},
 	}
 
-	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
+	html, err := fetcher.GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
@@ -347,14 +179,14 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		return page, nil
 	}
 
-	page.SEO = extractSEO(html)
+	page.SEO = parser.ExtractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	page.Assets = make([]Asset, 0)
-	page.BrokenLinks = make([]BrokenLink, 0)
+	page.Assets = make([]types.Asset, 0)
+	page.BrokenLinks = make([]types.BrokenLink, 0)
 
 	baseURL, _ := url.Parse(pageURL)
-	assetURLs := ExtractAssetURLs(html)
+	assetURLs := parser.ExtractAssetURLs(html)
 	for _, assetURL := range assetURLs {
 		abs, _ := NormalizeURL(assetURL, baseURL)
 		if !ShouldCheckAsset(abs) {
@@ -365,16 +197,16 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		assetMu.RUnlock()
 
 		if exists {
-			page.Assets = append(page.Assets, cached.asset)
+			page.Assets = append(page.Assets, cached.Asset)
 			continue
 		}
-		asset := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		asset := fetcher.FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
 		assetMu.Lock()
-		assetCache[abs] = assetCacheItem{asset: asset}
+		assetCache[abs] = types.AssetCacheItem{Asset: asset}
 		assetMu.Unlock()
 		page.Assets = append(page.Assets, asset)
 	}
-	linkURLs := extractLinks(html)
+	linkURLs := parser.ExtractLinks(html)
 	for _, link := range linkURLs {
 		absLink, _ := NormalizeURL(link, baseURL)
 		if absLink == "" {
@@ -393,7 +225,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 
 		resp, err := opts.HTTPClient.Do(req)
 		if err != nil {
-			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
+			page.BrokenLinks = append(page.BrokenLinks, types.BrokenLink{
 				URL:        absLink,
 				StatusCode: 0,
 				Error:      err.Error(),
@@ -403,7 +235,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Pa
 		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode >= 400 {
-			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
+			page.BrokenLinks = append(page.BrokenLinks, types.BrokenLink{
 				URL:        absLink,
 				StatusCode: resp.StatusCode,
 				Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
