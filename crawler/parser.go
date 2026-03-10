@@ -1,18 +1,17 @@
-package parser
+package crawler
 
 import (
-	types "code/internal/types"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
-func ExtractSEO(html string) *types.SEO {
+func ExtractSEO(html string) *SEO {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return &types.SEO{}
+		return &SEO{}
 	}
-	seo := &types.SEO{}
+	seo := &SEO{}
 	titleTag := doc.Find("title").First()
 	if titleTag.Length() > 0 {
 		seo.Title = strings.TrimSpace(titleTag.Text())

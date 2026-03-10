@@ -2,7 +2,6 @@ package main
 
 import (
 	code "code/crawler"
-	types "code/internal/types"
 	"context"
 	"fmt"
 	"log"
@@ -66,7 +65,7 @@ func main() {
 				return cli.Exit("URL обязателен для анализа\nИспользование: hexlet-go-crawler [опции] <url>", 1)
 			}
 			url := c.Args().First()
-			opts := types.Options{
+			opts := code.Options{
 				URL:         url,
 				Depth:       c.Int("depth"),
 				Retries:     c.Int("retries"),

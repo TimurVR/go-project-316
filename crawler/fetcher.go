@@ -1,7 +1,6 @@
-package fetcher
+package crawler
 
 import (
-	types "code/internal/types"
 	"context"
 	"io"
 	"net/http"
@@ -33,10 +32,10 @@ func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client,
 	return string(body), nil
 }
 
-func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) types.Asset {
+func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) Asset {
 	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
-		return types.Asset{
+		return Asset{
 			URL:        urlStr,
 			Type:       "other",
 			StatusCode: 0,
@@ -49,7 +48,7 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return types.Asset{
+		return Asset{
 			URL:        urlStr,
 			Type:       "other",
 			StatusCode: 0,
@@ -83,7 +82,7 @@ func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua stri
 		}
 	}
 
-	return types.Asset{
+	return Asset{
 		URL:        urlStr,
 		Type:       assetType,
 		StatusCode: resp.StatusCode,

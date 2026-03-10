@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	fetcher "code/internal/fetcher"
-	parser "code/internal/parser"
-	types "code/internal/types"
 	"net/http"
 	"net/url"
 	"sort"
@@ -16,11 +13,11 @@ import (
 )
 
 var (
-	assetCache = make(map[string]types.AssetCacheItem)
+	assetCache = make(map[string]AssetCacheItem)
 	assetMu    sync.RWMutex
 )
 
-func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
+func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("URL обязателен")
 	}
@@ -35,25 +32,25 @@ func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
 	}
 	rawRoot, _ := NormalizeURL(opts.URL, nil)
 	rootURL, _ := url.Parse(rawRoot)
-	rateLimiter := fetcher.NewRateLimiter(opts.Delay, opts.RPS)
-	report := types.Report{
+	rateLimiter := NewRateLimiter(opts.Delay, opts.RPS)
+	report := Report{
 		RootURL:     rawRoot,
 		Depth:       opts.Depth,
 		GeneratedAt: time.Now().UTC(),
-		Pages:       make([]types.Page, 0),
+		Pages:       make([]Page, 0),
 	}
 
 	visited := make(map[string]bool)
 	visitedMu := sync.Mutex{}
 	pagesMu := sync.Mutex{}
-	pagesMap := make(map[string]types.Page)
+	pagesMap := make(map[string]Page)
 
-	taskChan := make(chan types.CrawlTask, 10000)
+	taskChan := make(chan CrawlTask, 10000)
 	var activeTasks sync.WaitGroup
 	var workersWg sync.WaitGroup
 
 	assetMu.Lock()
-	assetCache = make(map[string]types.AssetCacheItem)
+	assetCache = make(map[string]AssetCacheItem)
 	assetMu.Unlock()
 
 	for i := 0; i < opts.Concurrency; i++ {
@@ -78,10 +75,10 @@ func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
 				pagesMu.Unlock()
 
 				if task.Depth < opts.Depth && page.Status == "ok" {
-					html, err := fetcher.GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
+					html, err := GetHTMLWithContext(ctx, page.URL, opts.HTTPClient, opts.UserAgent)
 					if err == nil {
 						baseURL, _ := url.Parse(page.URL)
-						for _, link := range parser.ExtractLinks(html) {
+						for _, link := range ExtractLinks(html) {
 							absLink, _ := NormalizeURL(link, baseURL)
 							if absLink == "" {
 								continue
@@ -95,7 +92,7 @@ func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
 									if task.Depth+1 < opts.Depth {
 										activeTasks.Add(1)
 										select {
-										case taskChan <- types.CrawlTask{URL: absLink, Depth: task.Depth + 1}:
+										case taskChan <- CrawlTask{URL: absLink, Depth: task.Depth + 1}:
 										case <-ctx.Done():
 											activeTasks.Done()
 										}
@@ -113,7 +110,7 @@ func Analyze(ctx context.Context, opts types.Options) ([]byte, error) {
 
 	visited[rawRoot] = true
 	activeTasks.Add(1)
-	taskChan <- types.CrawlTask{URL: rawRoot, Depth: 0}
+	taskChan <- CrawlTask{URL: rawRoot, Depth: 0}
 
 	go func() {
 		activeTasks.Wait()
@@ -162,15 +159,15 @@ func ShouldCheckAsset(urlStr string) bool {
 	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
 }
 
-func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth int) (types.Page, error) {
-	page := types.Page{
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int) (Page, error) {
+	page := Page{
 		URL:          pageURL,
 		Depth:        depth,
 		DiscoveredAt: time.Now().UTC(),
-		SEO:          &types.SEO{},
+		SEO:          &SEO{},
 	}
 
-	html, err := fetcher.GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
+	html, err := GetHTMLWithContext(ctx, pageURL, opts.HTTPClient, opts.UserAgent)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
@@ -179,14 +176,14 @@ func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth in
 		return page, nil
 	}
 
-	page.SEO = parser.ExtractSEO(html)
+	page.SEO = ExtractSEO(html)
 	page.Status = "ok"
 	page.HTTPStatus = 200
-	page.Assets = make([]types.Asset, 0)
-	page.BrokenLinks = make([]types.BrokenLink, 0)
+	page.Assets = make([]Asset, 0)
+	page.BrokenLinks = make([]BrokenLink, 0)
 
 	baseURL, _ := url.Parse(pageURL)
-	assetURLs := parser.ExtractAssetURLs(html)
+	assetURLs := ExtractAssetURLs(html)
 	for _, assetURL := range assetURLs {
 		abs, _ := NormalizeURL(assetURL, baseURL)
 		if !ShouldCheckAsset(abs) {
@@ -200,13 +197,13 @@ func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth in
 			page.Assets = append(page.Assets, cached.Asset)
 			continue
 		}
-		asset := fetcher.FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
+		asset := FetchAsset(ctx, opts.HTTPClient, abs, opts.UserAgent)
 		assetMu.Lock()
-		assetCache[abs] = types.AssetCacheItem{Asset: asset}
+		assetCache[abs] = AssetCacheItem{Asset: asset}
 		assetMu.Unlock()
 		page.Assets = append(page.Assets, asset)
 	}
-	linkURLs := parser.ExtractLinks(html)
+	linkURLs := ExtractLinks(html)
 	for _, link := range linkURLs {
 		absLink, _ := NormalizeURL(link, baseURL)
 		if absLink == "" {
@@ -225,7 +222,7 @@ func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth in
 
 		resp, err := opts.HTTPClient.Do(req)
 		if err != nil {
-			page.BrokenLinks = append(page.BrokenLinks, types.BrokenLink{
+			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
 				URL:        absLink,
 				StatusCode: 0,
 				Error:      err.Error(),
@@ -235,7 +232,7 @@ func crawlPage(ctx context.Context, opts types.Options, pageURL string, depth in
 		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode >= 400 {
-			page.BrokenLinks = append(page.BrokenLinks, types.BrokenLink{
+			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
 				URL:        absLink,
 				StatusCode: resp.StatusCode,
 				Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
