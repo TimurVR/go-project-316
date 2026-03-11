@@ -229,7 +229,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, htm
 				URL: absLink, StatusCode: resp.StatusCode, Error: fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	return page, nil
@@ -249,7 +249,7 @@ func doWithRetries(ctx context.Context, opts Options, fn func() (*http.Response,
 		resp, lastErr = fn()
 		if lastErr != nil || (resp != nil && (resp.StatusCode == 429 || resp.StatusCode >= 500)) {
 			if resp != nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 			}
 			continue
 		}
