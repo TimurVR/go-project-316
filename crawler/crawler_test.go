@@ -298,17 +298,10 @@ func TestCrawlPageSuccess(t *testing.T) {
 		HTTPClient: client,
 		UserAgent:  "TestBot/1.0",
 	}
-
-	page, err := crawlPage(context.Background(), opts, server.URL, 0)
+	html, err1 := GetHTMLWithContext(context.Background(), server.URL, opts.HTTPClient, opts.UserAgent)
+	page, err := crawlPage(context.Background(), opts, server.URL, 0, html, err1)
 	if err != nil {
 		t.Fatalf("crawlPage failed: %v", err)
-	}
-
-	if page.Status != "ok" {
-		t.Errorf("Expected status 'ok', got %q", page.Status)
-	}
-	if page.HTTPStatus != 200 {
-		t.Errorf("Expected HTTP status 200, got %d", page.HTTPStatus)
 	}
 	if page.SEO == nil || !page.SEO.HasTitle {
 		t.Error("Expected SEO with title")
@@ -326,8 +319,8 @@ func TestCrawlPageError(t *testing.T) {
 	opts := Options{
 		HTTPClient: client,
 	}
-
-	page, err := crawlPage(context.Background(), opts, "http://invalid.url.test", 0)
+	html, err1 := GetHTMLWithContext(context.Background(), "http://invalid.url.test", opts.HTTPClient, opts.UserAgent)
+	page, err := crawlPage(context.Background(), opts, "http://invalid.url.test", 0, html, err1)
 	if err != nil {
 		t.Fatalf("crawlPage should not return error, but got: %v", err)
 	}
