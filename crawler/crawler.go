@@ -174,6 +174,8 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, htm
 	}
 
 	page.SEO = ExtractSEO(html)
+	page.Status = "ok"
+	page.HTTPStatus = 200
 	page.Assets = make([]Asset, 0)
 	page.BrokenLinks = make([]BrokenLink, 0)
 
