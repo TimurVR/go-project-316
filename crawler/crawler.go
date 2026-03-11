@@ -209,33 +209,51 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, htm
 		if !strings.HasPrefix(absLink, "http") {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, "HEAD", absLink, nil)
-		if err != nil {
-			continue
-		}
-		if opts.UserAgent != "" {
-			req.Header.Set("User-Agent", opts.UserAgent)
-		}
+		resp, err := doWithRetries(ctx, opts, func() (*http.Response, error) {
+			req, _ := http.NewRequestWithContext(ctx, "HEAD", absLink, nil)
+			if opts.UserAgent != "" {
+				req.Header.Set("User-Agent", opts.UserAgent)
+			}
+			return opts.HTTPClient.Do(req)
+		})
 
-		resp, err := opts.HTTPClient.Do(req)
 		if err != nil {
 			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
-				URL:        absLink,
-				StatusCode: 0,
-				Error:      err.Error(),
+				URL: absLink, StatusCode: 0, Error: err.Error(),
 			})
 			continue
 		}
-		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode >= 400 {
 			page.BrokenLinks = append(page.BrokenLinks, BrokenLink{
-				URL:        absLink,
-				StatusCode: resp.StatusCode,
-				Error:      fmt.Sprintf("HTTP %d", resp.StatusCode),
+				URL: absLink, StatusCode: resp.StatusCode, Error: fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 		}
+		resp.Body.Close()
 	}
 
 	return page, nil
+}
+func doWithRetries(ctx context.Context, opts Options, fn func() (*http.Response, error)) (*http.Response, error) {
+	var lastErr error
+	var resp *http.Response
+	for i := 0; i <= opts.MaxRetries; i++ {
+		if i > 0 {
+			select {
+			case <-time.After(1 * time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		resp, lastErr = fn()
+		if lastErr != nil || (resp != nil && (resp.StatusCode == 429 || resp.StatusCode >= 500)) {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+		return resp, lastErr
+	}
+	return resp, lastErr
 }
