@@ -15,21 +15,21 @@ type RateLimiter struct {
 	Mu          sync.Mutex
 }
 
-func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, error) {
+func GetHTMLWithContext(ctx context.Context, urlStr string, client *http.Client, ua string) (string, int, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
-		return "", err
+		return "", 404, err
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", 404, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
-	return string(body), nil
+	return string(body), resp.StatusCode, nil
 }
 
 func FetchAsset(ctx context.Context, client *http.Client, urlStr string, ua string) Asset {

@@ -67,8 +67,8 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 					activeTasks.Done()
 					continue
 				}
-				html, err := GetHTMLWithContext(ctx, task.URL, opts.HTTPClient, opts.UserAgent)
-				page, _ := crawlPage(ctx, opts, task.URL, task.Depth, html, err)
+				html, status, err := GetHTMLWithContext(ctx, task.URL, opts.HTTPClient, opts.UserAgent)
+				page, _ := crawlPage(ctx, opts, task.URL, task.Depth, html, status, err)
 
 				pagesMu.Lock()
 				pagesMap[page.URL] = page
@@ -158,7 +158,7 @@ func ShouldCheckAsset(urlStr string) bool {
 	return urlStr != "" && (strings.HasPrefix(urlStr, "http://") || strings.HasPrefix(urlStr, "https://"))
 }
 
-func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, html string, err error) (Page, error) {
+func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, html string, status int, err error) (Page, error) {
 	page := Page{
 		URL:          pageURL,
 		Depth:        depth,
@@ -174,8 +174,10 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, htm
 	}
 
 	page.SEO = ExtractSEO(html)
-	page.Status = "ok"
-	page.HTTPStatus = 200
+	page.HTTPStatus = status
+	if status == 200 {
+		page.Status = "ok"
+	}
 	page.Assets = make([]Asset, 0)
 	page.BrokenLinks = make([]BrokenLink, 0)
 

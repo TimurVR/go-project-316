@@ -241,7 +241,7 @@ func TestGetHTMLWithContext(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	html, err := GetHTMLWithContext(context.Background(), server.URL, client, "TestBot/1.0")
+	html, _, err := GetHTMLWithContext(context.Background(), server.URL, client, "TestBot/1.0")
 	if err != nil {
 		t.Fatalf("GetHTMLWithContext failed: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestGetHTMLWithContext(t *testing.T) {
 
 func TestGetHTMLWithContextError(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	_, err := GetHTMLWithContext(context.Background(), "http://invalid.url.test", client, "")
+	_, _, err := GetHTMLWithContext(context.Background(), "http://invalid.url.test", client, "")
 	if err == nil {
 		t.Error("Expected error for invalid URL, got nil")
 	}
@@ -298,8 +298,8 @@ func TestCrawlPageSuccess(t *testing.T) {
 		HTTPClient: client,
 		UserAgent:  "TestBot/1.0",
 	}
-	html, err1 := GetHTMLWithContext(context.Background(), server.URL, opts.HTTPClient, opts.UserAgent)
-	page, err := crawlPage(context.Background(), opts, server.URL, 0, html, err1)
+	html, _, err1 := GetHTMLWithContext(context.Background(), server.URL, opts.HTTPClient, opts.UserAgent)
+	page, err := crawlPage(context.Background(), opts, server.URL, 0, html, 200, err1)
 	if err != nil {
 		t.Fatalf("crawlPage failed: %v", err)
 	}
@@ -319,8 +319,8 @@ func TestCrawlPageError(t *testing.T) {
 	opts := Options{
 		HTTPClient: client,
 	}
-	html, err1 := GetHTMLWithContext(context.Background(), "http://invalid.url.test", opts.HTTPClient, opts.UserAgent)
-	page, err := crawlPage(context.Background(), opts, "http://invalid.url.test", 0, html, err1)
+	html, _, err1 := GetHTMLWithContext(context.Background(), "http://invalid.url.test", opts.HTTPClient, opts.UserAgent)
+	page, err := crawlPage(context.Background(), opts, "http://invalid.url.test", 0, html, 200, err1)
 	if err != nil {
 		t.Fatalf("crawlPage should not return error, but got: %v", err)
 	}
