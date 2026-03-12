@@ -239,7 +239,7 @@ func crawlPage(ctx context.Context, opts Options, pageURL string, depth int, htm
 func doWithRetries(ctx context.Context, opts Options, fn func() (*http.Response, error)) (*http.Response, error) {
 	var lastErr error
 	var resp *http.Response
-	for i := 0; i <= opts.MaxRetries; i++ {
+	for i := 0; i <= opts.Retries; i++ {
 		if i > 0 {
 			select {
 			case <-time.After(1 * time.Second):

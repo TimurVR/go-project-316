@@ -68,7 +68,7 @@ func main() {
 			opts := code.Options{
 				URL:         url,
 				Depth:       c.Int("depth"),
-				MaxRetries:     c.Int("retries"),
+				Retries:     c.Int("retries"),
 				Delay:       c.Duration("delay"),
 				Timeout:     c.Duration("timeout"),
 				RPS:         c.Float("rps"),

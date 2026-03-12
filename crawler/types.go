@@ -16,7 +16,6 @@ type Options struct {
 	Concurrency int
 	IndentJSON  bool
 	HTTPClient  *http.Client
-	MaxRetries  int
 }
 type Report struct {
 	RootURL     string    `json:"root_url"`
