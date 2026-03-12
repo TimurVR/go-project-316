@@ -8,7 +8,7 @@ import (
 type Options struct {
 	URL         string
 	Depth       int
-	Retries     int
+	MaxRetries  int
 	Delay       time.Duration
 	RPS         float64
 	Timeout     time.Duration
@@ -16,7 +16,6 @@ type Options struct {
 	Concurrency int
 	IndentJSON  bool
 	HTTPClient  *http.Client
-	MaxRetries  int
 }
 type Report struct {
 	RootURL     string    `json:"root_url"`
